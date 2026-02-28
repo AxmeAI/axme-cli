@@ -5,7 +5,7 @@ Thank you for your interest in contributing.
 ## Development Workflow
 
 1. Open an issue to discuss changes.
-2. Create a branch from .
+2. Create a branch from main.
 3. Add tests for all behavioral changes.
 4. Ensure CI passes before opening a PR.
 
