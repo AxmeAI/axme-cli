@@ -1,112 +1,71 @@
 # axme-cli
 
-Command-line interface for Axme Cloud enterprise and portal operations.
+Go CLI for Axme Cloud control surface and intent operations.
 
 ## Status
 
-Active CLI implementation for alpha CLI-first scope.
+CLI-first alpha implementation.
 
-## Install (local development)
+`login` web redirect/device flow is intentionally deferred until `axme-cloud-landing` domain auth form is connected to API. For now, use token/API-key based login.
 
-```bash
-python -m pip install -e .
-```
-
-This provides the `axme` command from `pyproject.toml`.
-
-## Configuration
-
-CLI supports explicit flags or environment variables:
-
-- `--base-url` or `AXME_PORTAL_BASE_URL` (fallback: `AXME_GATEWAY_BASE_URL`, then `http://127.0.0.1:8100`)
-- `--api-key` or `AXME_GATEWAY_API_KEY`
-- `--bearer-token` or `AXME_PORTAL_SCOPED_BEARER_TOKEN`
-- `--default-org-id` or `AXME_ORG_ID`
-- `--default-workspace-id` or `AXME_WORKSPACE_ID`
-
-Example:
+## Build
 
 ```bash
-export AXME_PORTAL_BASE_URL="https://axme-gateway-uc2bllq3la-uc.a.run.app"
-export AXME_GATEWAY_API_KEY="..."
-export AXME_PORTAL_SCOPED_BEARER_TOKEN="..."
-export AXME_ORG_ID="..."
-export AXME_WORKSPACE_ID="..."
+go build -o ./bin/axme ./cmd/axme
+./bin/axme version
 ```
 
-## Quick Start
+## Quick setup
 
 ```bash
-axme health
-axme portal-navigation --org-id "$AXME_ORG_ID" --workspace-id "$AXME_WORKSPACE_ID"
-axme portal-personal-overview --org-id "$AXME_ORG_ID" --workspace-id "$AXME_WORKSPACE_ID"
-axme deliveries-operations --org-id "$AXME_ORG_ID" --workspace-id "$AXME_WORKSPACE_ID" --window-hours 24
+./bin/axme context set default \
+  --base-url "https://axme-gateway.example.com" \
+  --api-key "..." \
+  --bearer-token "..." \
+  --org-id "org_..." \
+  --workspace-id "ws_..." \
+  --owner-agent "agent://ops" \
+  --environment "staging"
+
+./bin/axme context use default
+./bin/axme status
+./bin/axme whoami
 ```
 
-All commands return JSON:
+Env fallbacks are also supported:
 
-```json
-{
-  "status_code": 200,
-  "ok": true,
-  "body": { "...": "..." }
-}
-```
+- `AXME_PORTAL_BASE_URL` (or `AXME_GATEWAY_BASE_URL`)
+- `AXME_GATEWAY_API_KEY`
+- `AXME_PORTAL_SCOPED_BEARER_TOKEN`
+- `AXME_ORG_ID`
+- `AXME_WORKSPACE_ID`
+- `AXME_OWNER_AGENT`
 
-Use `--compact` for one-line JSON output.
+## Command groups
 
-## Command Groups
+- `login`, `whoami`, `context`, `logout`
+- `init`, `examples`, `run`
+- `intents list|get|watch|cancel|retry|resume`
+- `logs`, `trace`
+- `agents list|register|resolve`
+- `keys list|create|revoke`
+- `status`, `doctor`, `version`
+- `raw`
 
-### Organizations and Workspaces
+Use `--json` for machine-readable output in any command.
 
-- `org-create`
-- `org-get`
-- `org-update`
-- `workspace-create`
-- `workspace-list`
-- `workspace-update`
-
-### Members and Access
-
-- `member-list`
-- `member-add`
-- `member-update`
-- `member-remove`
-- `access-request-create`
-- `access-request-list`
-- `access-request-get`
-- `access-request-review`
-
-### Service Accounts
-
-- `service-account-create`
-- `service-account-list`
-- `service-account-get`
-- `service-account-key-create`
-- `service-account-key-revoke`
-
-### Portal and Delivery Operations
-
-- `portal-navigation`
-- `portal-request-queue`
-- `portal-personal-overview`
-- `portal-enterprise-overview`
-- `deliveries-operations`
-- `deliveries-reconcile`
-
-### Raw API
-
-Use raw requests when a dedicated command is not yet exposed:
+## Examples
 
 ```bash
-axme raw GET /v1/access-requests --query org_id="$AXME_ORG_ID" --query state=pending
-axme raw POST /v1/deliveries/reconcile --data-json '{"org_id":"...","workspace_id":"...","target_status":"dead_lettered"}'
+./bin/axme examples
+./bin/axme run approval-resume
+./bin/axme intents list --status WAITING --limit 20
+./bin/axme intents watch intent_123 --follow
+./bin/axme raw GET /v1/capabilities
 ```
 
 ## Tests
 
-Run CLI tests:
-
 ```bash
-python -m unittest discover -s tests -p "test_*.py"
+go test ./...
 ```

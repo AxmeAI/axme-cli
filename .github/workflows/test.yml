@@ -11,16 +11,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          python-version: "3.13"
+          go-version-file: "go.mod"
       - name: Repository smoke check
         run: |
           test -f README.md
-          test -f pyproject.toml
-          test -d axme_cli
-          test -d tests
-      - name: Run CLI unit tests
+          test -f go.mod
+          test -d cmd
+      - name: Run Go tests
         run: |
-          python -m unittest discover -s tests -p "test_*.py"
+          go test ./...
