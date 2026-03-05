@@ -3,7 +3,7 @@
 **Go CLI for the AXME platform.** Manage intent lifecycle, configure runtime contexts, inspect audit logs, and operate the platform from the terminal — single binary, no runtime dependencies.
 
 > **Alpha** · CLI surface is stabilizing. Not recommended for production scripting yet.  
-> Bug reports, feedback, and alpha access → [hello@axme.ai](mailto:hello@axme.ai)
+> Alpha access: https://cloud.axme.ai/alpha · Contact and suggestions: [hello@axme.ai](mailto:hello@axme.ai)
 
 ---
 
@@ -160,6 +160,6 @@ go test ./...
 ## Contributing & Contact
 
 - Bug reports and feature requests: open an issue in this repository
-- Alpha program access and CLI feedback: [hello@axme.ai](mailto:hello@axme.ai)
+- Alpha access: https://cloud.axme.ai/alpha · Contact and suggestions: [hello@axme.ai](mailto:hello@axme.ai)
 - Security disclosures: see [SECURITY.md](SECURITY.md)
 - Contribution guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
