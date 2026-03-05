@@ -153,7 +153,7 @@ go test ./...
 |---|---|
 | [axme-sdk-go](https://github.com/AxmeAI/axme-sdk-go) | Go SDK that the CLI is built on |
 | [axme-docs](https://github.com/AxmeAI/axme-docs) | Full API reference and integration guides |
-| [axme-infra](https://github.com/AxmeAI/axme-infra) | Deployment and operational runbooks |
+| Runtime operations (private) | Deployment and operational runbooks are maintained internally |
 
 ---
 
