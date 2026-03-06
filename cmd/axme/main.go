@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	stdruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,6 +30,8 @@ var (
 	date    = "unknown"
 )
 
+const defaultAlphaOnboardingURL = "https://cloud.axme.ai/alpha"
+
 type cliError struct {
 	Code int
 	Msg  string
@@ -43,6 +47,7 @@ type appConfig struct {
 type clientConfig struct {
 	BaseURL     string `json:"base_url"`
 	APIKey      string `json:"api_key,omitempty"`
+	ActorToken  string `json:"actor_token,omitempty"`
 	BearerToken string `json:"bearer_token,omitempty"`
 	OwnerAgent  string `json:"owner_agent,omitempty"`
 	OrgID       string `json:"org_id,omitempty"`
@@ -119,6 +124,7 @@ func buildRoot(rt *runtime) *cobra.Command {
 	cmd.PersistentFlags().StringVar(&rt.contextName, "context-name", "", "override active context name")
 	cmd.PersistentFlags().StringVar(&rt.overrideBase, "base-url", "", "gateway base URL override")
 	cmd.PersistentFlags().StringVar(&rt.overrideKey, "api-key", "", "gateway API key override")
+	cmd.PersistentFlags().StringVar(&rt.overrideJWT, "actor-token", "", "actor token override")
 	cmd.PersistentFlags().StringVar(&rt.overrideJWT, "bearer-token", "", "bearer token override")
 	cmd.PersistentFlags().StringVar(&rt.overrideOrg, "org-id", "", "default org id override")
 	cmd.PersistentFlags().StringVar(&rt.overrideWs, "workspace-id", "", "default workspace id override")
@@ -151,14 +157,63 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 	var token string
 	var owner string
 	var targetContext string
+	var useWebOnboarding bool
+	var noBrowser bool
+	var onboardingURL string
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Store CLI credentials (web login bridge is deferred)",
+		Short: "Store CLI credentials via key input or web onboarding",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if onboardingURL == "" {
+				onboardingURL = defaultAlphaOnboardingURL
+			}
 			if key == "" && token == "" {
-				msg := "Web/device login is intentionally deferred until axme-cloud-landing domain auth form is wired to API. Use --api-key/--bearer-token for now."
+				if interactiveInputAvailable() {
+					if useWebOnboarding {
+						if !noBrowser {
+							if err := openURLInBrowser(onboardingURL); err != nil && !rt.outputJSON {
+								fmt.Fprintf(os.Stderr, "warning: could not open browser automatically: %v\n", err)
+							}
+						}
+						enteredKey, err := promptLine("Paste AXME API key from onboarding page (or press Enter to cancel): ")
+						if err != nil {
+							return err
+						}
+						key = enteredKey
+					} else {
+						enteredKey, err := promptLine("AXME API key (press Enter to open web onboarding): ")
+						if err != nil {
+							return err
+						}
+						if enteredKey == "" {
+							if !noBrowser {
+								if err := openURLInBrowser(onboardingURL); err != nil && !rt.outputJSON {
+									fmt.Fprintf(os.Stderr, "warning: could not open browser automatically: %v\n", err)
+								}
+							}
+							enteredFromWeb, err := promptLine("Paste AXME API key from onboarding page (or press Enter to cancel): ")
+							if err != nil {
+								return err
+							}
+							key = enteredFromWeb
+						} else {
+							key = enteredKey
+						}
+					}
+				}
+			}
+			if key == "" && token == "" {
+				msg := fmt.Sprintf(
+					"No credentials were stored. Use --api-key/--actor-token, or open %s to get a bootstrap key (then run `axme login --api-key <key>`).",
+					onboardingURL,
+				)
 				if rt.outputJSON {
-					return rt.printJSON(map[string]any{"ok": true, "deferred": true, "message": msg})
+					return rt.printJSON(map[string]any{
+						"ok":             true,
+						"deferred":       true,
+						"onboarding_url": onboardingURL,
+						"message":        msg,
+					})
 				}
 				fmt.Println(msg)
 				return nil
@@ -172,7 +227,7 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 				ctx.APIKey = strings.TrimSpace(key)
 			}
 			if token != "" {
-				ctx.BearerToken = strings.TrimSpace(token)
+				ctx.setActorToken(strings.TrimSpace(token))
 			}
 			if owner != "" {
 				ctx.OwnerAgent = strings.TrimSpace(owner)
@@ -187,9 +242,13 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&key, "api-key", "", "API key")
+	cmd.Flags().StringVar(&token, "actor-token", "", "Actor token (Authorization: Bearer ...)")
 	cmd.Flags().StringVar(&token, "bearer-token", "", "Bearer token")
 	cmd.Flags().StringVar(&owner, "owner-agent", "", "Owner agent (e.g. agent://alice)")
 	cmd.Flags().StringVar(&targetContext, "context", "", "Target context name")
+	cmd.Flags().BoolVar(&useWebOnboarding, "web", false, "open alpha onboarding form and prompt to paste issued API key")
+	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't try to open browser automatically during login")
+	cmd.Flags().StringVar(&onboardingURL, "onboarding-url", defaultAlphaOnboardingURL, "web onboarding URL for API key issuance")
 	return cmd
 }
 
@@ -207,7 +266,7 @@ func newWhoamiCmd(rt *runtime) *cobra.Command {
 				"owner_agent":  ctx.OwnerAgent,
 				"environment":  ctx.Environment,
 			}
-			if ctx.BearerToken != "" {
+			if ctx.resolvedActorToken() != "" {
 				_, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/auth/sessions", map[string]string{"include_revoked": "false"}, nil, false)
 				if err == nil {
 					out["sessions"] = body["sessions"]
@@ -227,7 +286,7 @@ func newLogoutCmd(rt *runtime) *cobra.Command {
 		Short: "Clear stored credentials for active context",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := rt.ensureContext(rt.activeContextName())
-			ctx.BearerToken = ""
+			ctx.setActorToken("")
 			if all {
 				ctx.APIKey = ""
 			}
@@ -251,6 +310,7 @@ func newContextCmd(rt *runtime) *cobra.Command {
 			RunE: func(cmd *cobra.Command, args []string) error {
 				rows := make([]map[string]any, 0, len(rt.cfg.Contexts))
 				for name, c := range rt.cfg.Contexts {
+					c.normalizeActorToken()
 					rows = append(rows, map[string]any{
 						"name":         name,
 						"active":       name == rt.activeContextName(),
@@ -260,13 +320,14 @@ func newContextCmd(rt *runtime) *cobra.Command {
 						"owner_agent":  c.OwnerAgent,
 						"environment":  c.Environment,
 						"has_api_key":  c.APIKey != "",
+						"has_actor":    c.resolvedActorToken() != "",
 						"has_bearer":   c.BearerToken != "",
 					})
 				}
 				if rt.outputJSON {
 					return rt.printJSON(rows)
 				}
-				printTable([]string{"NAME", "ACTIVE", "BASE_URL", "ORG", "WORKSPACE", "OWNER", "ENV", "API_KEY", "BEARER"}, rows, []string{"name", "active", "base_url", "org_id", "workspace_id", "owner_agent", "environment", "has_api_key", "has_bearer"})
+				printTable([]string{"NAME", "ACTIVE", "BASE_URL", "ORG", "WORKSPACE", "OWNER", "ENV", "API_KEY", "ACTOR", "BEARER"}, rows, []string{"name", "active", "base_url", "org_id", "workspace_id", "owner_agent", "environment", "has_api_key", "has_actor", "has_bearer"})
 				return nil
 			},
 		},
@@ -284,6 +345,7 @@ func newContextCmd(rt *runtime) *cobra.Command {
 					"owner_agent":  c.OwnerAgent,
 					"environment":  c.Environment,
 					"has_api_key":  c.APIKey != "",
+					"has_actor":    c.resolvedActorToken() != "",
 					"has_bearer":   c.BearerToken != "",
 				})
 			},
@@ -329,7 +391,7 @@ func newContextSetCmd(rt *runtime) *cobra.Command {
 				c.APIKey = key
 			}
 			if token != "" {
-				c.BearerToken = token
+				c.setActorToken(token)
 			}
 			if org != "" {
 				c.OrgID = org
@@ -351,6 +413,7 @@ func newContextSetCmd(rt *runtime) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&base, "base-url", "", "base URL")
 	cmd.Flags().StringVar(&key, "api-key", "", "API key")
+	cmd.Flags().StringVar(&token, "actor-token", "", "actor token")
 	cmd.Flags().StringVar(&token, "bearer-token", "", "bearer token")
 	cmd.Flags().StringVar(&org, "org-id", "", "default org id")
 	cmd.Flags().StringVar(&ws, "workspace-id", "", "default workspace id")
@@ -997,7 +1060,7 @@ func newDoctorCmd(rt *runtime) *cobra.Command {
 			checks := []map[string]any{
 				{"check": "config_file", "ok": fileExists(rt.cfgFile), "detail": rt.cfgFile},
 				{"check": "base_url", "ok": ctx.BaseURL != "", "detail": ctx.BaseURL},
-				{"check": "api_key_or_bearer", "ok": ctx.APIKey != "" || ctx.BearerToken != "", "detail": "credentials present"},
+				{"check": "api_key_or_actor", "ok": ctx.APIKey != "" || ctx.resolvedActorToken() != "", "detail": "credentials present"},
 			}
 			_, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/health", nil, nil, true)
 			checks = append(checks, map[string]any{"check": "health_endpoint", "ok": err == nil, "detail": body})
@@ -1213,8 +1276,8 @@ func (rt *runtime) applyAuthHeaders(req *http.Request, c *clientConfig) {
 	if c.APIKey != "" {
 		req.Header.Set("x-api-key", c.APIKey)
 	}
-	if c.BearerToken != "" {
-		req.Header.Set("authorization", "Bearer "+c.BearerToken)
+	if actorToken := c.resolvedActorToken(); actorToken != "" {
+		req.Header.Set("authorization", "Bearer "+actorToken)
 	}
 	if c.OwnerAgent != "" {
 		req.Header.Set("x-owner-agent", c.OwnerAgent)
@@ -1224,6 +1287,7 @@ func (rt *runtime) applyAuthHeaders(req *http.Request, c *clientConfig) {
 func (rt *runtime) effectiveContext() *clientConfig {
 	active := rt.ensureContext(rt.activeContextName())
 	merged := *active
+	merged.normalizeActorToken()
 	if merged.BaseURL == "" {
 		if v := strings.TrimSpace(os.Getenv("AXME_PORTAL_BASE_URL")); v != "" {
 			merged.BaseURL = strings.TrimRight(v, "/")
@@ -1234,9 +1298,13 @@ func (rt *runtime) effectiveContext() *clientConfig {
 	if merged.APIKey == "" {
 		merged.APIKey = strings.TrimSpace(os.Getenv("AXME_GATEWAY_API_KEY"))
 	}
+	if merged.ActorToken == "" {
+		merged.ActorToken = strings.TrimSpace(os.Getenv("AXME_ACTOR_TOKEN"))
+	}
 	if merged.BearerToken == "" {
 		merged.BearerToken = strings.TrimSpace(os.Getenv("AXME_PORTAL_SCOPED_BEARER_TOKEN"))
 	}
+	merged.normalizeActorToken()
 	if merged.OrgID == "" {
 		merged.OrgID = strings.TrimSpace(os.Getenv("AXME_ORG_ID"))
 	}
@@ -1256,7 +1324,7 @@ func (rt *runtime) effectiveContext() *clientConfig {
 		merged.APIKey = rt.overrideKey
 	}
 	if rt.overrideJWT != "" {
-		merged.BearerToken = rt.overrideJWT
+		merged.setActorToken(rt.overrideJWT)
 	}
 	if rt.overrideOrg != "" {
 		merged.OrgID = rt.overrideOrg
@@ -1276,6 +1344,7 @@ func (rt *runtime) effectiveContext() *clientConfig {
 func (rt *runtime) ensureContext(name string) *clientConfig {
 	c, ok := rt.cfg.Contexts[name]
 	if ok {
+		c.normalizeActorToken()
 		return c
 	}
 	c = &clientConfig{BaseURL: "http://127.0.0.1:8100", Environment: "staging"}
@@ -1340,6 +1409,41 @@ func printTable(headers []string, rows []map[string]any, keys []string) {
 	_ = w.Flush()
 }
 
+func interactiveInputAvailable() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+func promptLine(prompt string) (string, error) {
+	fmt.Fprint(os.Stderr, prompt)
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func openURLInBrowser(target string) error {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return errors.New("empty onboarding URL")
+	}
+	var cmd *exec.Cmd
+	switch stdruntime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", target)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
+	default:
+		cmd = exec.Command("xdg-open", target)
+	}
+	return cmd.Start()
+}
+
 func resolveConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -1376,6 +1480,11 @@ func loadConfig(path string) (*appConfig, error) {
 	if cfg.Contexts == nil {
 		cfg.Contexts = map[string]*clientConfig{}
 	}
+	for _, c := range cfg.Contexts {
+		if c != nil {
+			c.normalizeActorToken()
+		}
+	}
 	if cfg.ActiveContext == "" {
 		cfg.ActiveContext = "default"
 	}
@@ -1386,11 +1495,47 @@ func loadConfig(path string) (*appConfig, error) {
 }
 
 func saveConfig(path string, cfg *appConfig) error {
+	for _, c := range cfg.Contexts {
+		if c != nil {
+			c.normalizeActorToken()
+		}
+	}
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, raw, 0o600)
+}
+
+func (c *clientConfig) resolvedActorToken() string {
+	if c == nil {
+		return ""
+	}
+	if strings.TrimSpace(c.ActorToken) != "" {
+		return strings.TrimSpace(c.ActorToken)
+	}
+	return strings.TrimSpace(c.BearerToken)
+}
+
+func (c *clientConfig) setActorToken(token string) {
+	if c == nil {
+		return
+	}
+	normalized := strings.TrimSpace(token)
+	c.ActorToken = normalized
+	c.BearerToken = normalized
+}
+
+func (c *clientConfig) normalizeActorToken() {
+	if c == nil {
+		return
+	}
+	if c.ActorToken == "" && c.BearerToken != "" {
+		c.ActorToken = c.BearerToken
+	}
+	if c.BearerToken == "" && c.ActorToken != "" {
+		c.BearerToken = c.ActorToken
+	}
 }
 
 func builtInExamples() map[string]map[string]any {
