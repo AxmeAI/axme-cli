@@ -7,6 +7,43 @@
 
 ---
 
+## What Is AXME?
+
+AXME is a coordination infrastructure for durable execution of long-running intents across distributed systems.
+
+It provides a model for executing **intents** — requests that may take minutes, hours, or longer to complete — across services, agents, and human participants.
+
+## AXP — the Intent Protocol
+
+At the core of AXME is **AXP (Intent Protocol)** — an open protocol that defines contracts and lifecycle rules for intent processing.
+
+AXP can be implemented independently.  
+The open part of the platform includes:
+
+- the protocol specification and schemas
+- SDKs and CLI for integration
+- conformance tests
+- implementation and integration documentation
+
+## AXME Cloud
+
+**AXME Cloud** is the managed service that runs AXP in production together with **The Registry** (identity and routing).
+
+It removes operational complexity by providing:
+
+- reliable intent delivery and retries  
+- lifecycle management for long-running operations  
+- handling of timeouts, waits, reminders, and escalation  
+- observability of intent status and execution history  
+
+State and events can be accessed through:
+
+- API and SDKs  
+- event streams and webhooks  
+- the cloud console
+
+---
+
 ## What You Can Do With the CLI
 
 - **Manage contexts** — configure and switch between multiple gateway environments (local, staging, production)
@@ -41,7 +78,8 @@ Before using the CLI, configure a context pointing to your AXME gateway:
 ```bash
 axme context set default \
   --base-url "https://gateway.axme.ai" \
-  --api-key "YOUR_API_KEY" \
+  --api-key "YOUR_PLATFORM_API_KEY" \
+  --actor-token "OPTIONAL_USER_OR_SESSION_TOKEN" \
   --org-id "org_..." \
   --workspace-id "ws_..." \
   --owner-agent "agent://your-service" \
@@ -51,6 +89,8 @@ axme context use default
 axme status        # check connectivity
 axme whoami        # verify identity
 ```
+
+`--api-key` maps to `x-api-key`; `--actor-token` maps to `Authorization: Bearer ...` for routes that require actor context.
 
 ---
 
