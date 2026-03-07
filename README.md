@@ -77,8 +77,8 @@ Before using the CLI, configure a context pointing to your AXME gateway:
 
 ```bash
 axme context set default \
-  --base-url "https://gateway.axme.ai" \
-  --api-key "YOUR_PLATFORM_API_KEY" \
+  --base-url "https://api.cloud.axme.ai" \
+  --api-key "AXME_API_KEY_FROM_CLOUD_ALPHA" \
   --actor-token "OPTIONAL_USER_OR_SESSION_TOKEN" \
   --org-id "org_..." \
   --workspace-id "ws_..." \
@@ -90,7 +90,7 @@ axme status        # check connectivity
 axme whoami        # verify identity
 ```
 
-`--api-key` maps to `x-api-key`; `--actor-token` maps to `Authorization: Bearer ...` for routes that require actor context.
+`--api-key` maps to `x-api-key` (service-account/workspace key from `https://cloud.axme.ai/alpha`); `--actor-token` maps to `Authorization: Bearer ...` for actor-scoped routes.
 
 ---
 
@@ -152,6 +152,14 @@ axme version                       # CLI version and build info
 ```
 
 Add `--json` to any command for machine-readable output.
+
+### Service Accounts and Keys
+```bash
+axme service-accounts create --org-id <org_id> --workspace-id <ws_id> --name <name> --created-by-actor-id <actor_id>
+axme service-accounts list --org-id <org_id> [--workspace-id <ws_id>]
+axme service-accounts keys create --service-account-id <sa_id> --created-by-actor-id <actor_id>
+axme service-accounts keys revoke --service-account-id <sa_id> --key-id <sak_id>
+```
 
 ---
 

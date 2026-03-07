@@ -143,6 +143,7 @@ func buildRoot(rt *runtime) *cobra.Command {
 		newLogsCmd(rt),
 		newTraceCmd(rt),
 		newAgentsCmd(rt),
+		newServiceAccountsCmd(rt),
 		newKeysCmd(rt),
 		newStatusCmd(rt),
 		newDoctorCmd(rt),
@@ -957,6 +958,170 @@ func newKeysCmd(rt *runtime) *cobra.Command {
 	return cmd
 }
 
+func newServiceAccountsCmd(rt *runtime) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "service-accounts",
+		Aliases: []string{"serviceaccounts"},
+		Short:   "Manage service accounts and their keys",
+	}
+	cmd.AddCommand(
+		newServiceAccountsListCmd(rt),
+		newServiceAccountsCreateCmd(rt),
+		newServiceAccountKeysCmd(rt),
+	)
+	return cmd
+}
+
+func newServiceAccountsListCmd(rt *runtime) *cobra.Command {
+	var serviceAccountID string
+	var orgID string
+	var workspaceID string
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List service accounts or fetch one",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := rt.effectiveContext()
+			if serviceAccountID != "" {
+				status, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/service-accounts/"+serviceAccountID, nil, nil, true)
+				if err != nil {
+					return err
+				}
+				return rt.printResult(status, body)
+			}
+
+			resolvedOrgID := strings.TrimSpace(orgID)
+			if resolvedOrgID == "" {
+				resolvedOrgID = strings.TrimSpace(ctx.OrgID)
+			}
+			if resolvedOrgID == "" {
+				return &cliError{Code: 2, Msg: "org_id is required to list service accounts"}
+			}
+			resolvedWorkspaceID := strings.TrimSpace(workspaceID)
+			if resolvedWorkspaceID == "" {
+				resolvedWorkspaceID = strings.TrimSpace(ctx.WorkspaceID)
+			}
+			query := map[string]string{"org_id": resolvedOrgID}
+			if resolvedWorkspaceID != "" {
+				query["workspace_id"] = resolvedWorkspaceID
+			}
+			status, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/service-accounts", query, nil, true)
+			if err != nil {
+				return err
+			}
+			return rt.printResult(status, body)
+		},
+	}
+	cmd.Flags().StringVar(&serviceAccountID, "service-account-id", "", "specific service account id")
+	cmd.Flags().StringVar(&orgID, "org-id", "", "organization id (defaults to context org_id)")
+	cmd.Flags().StringVar(&workspaceID, "workspace-id", "", "workspace id (defaults to context workspace_id)")
+	return cmd
+}
+
+func newServiceAccountsCreateCmd(rt *runtime) *cobra.Command {
+	var orgID string
+	var workspaceID string
+	var name string
+	var description string
+	var createdBy string
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create service account",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := rt.effectiveContext()
+			resolvedOrgID := strings.TrimSpace(orgID)
+			if resolvedOrgID == "" {
+				resolvedOrgID = strings.TrimSpace(ctx.OrgID)
+			}
+			resolvedWorkspaceID := strings.TrimSpace(workspaceID)
+			if resolvedWorkspaceID == "" {
+				resolvedWorkspaceID = strings.TrimSpace(ctx.WorkspaceID)
+			}
+			if resolvedOrgID == "" || resolvedWorkspaceID == "" {
+				return &cliError{Code: 2, Msg: "org_id and workspace_id are required (flags or active context)"}
+			}
+			if strings.TrimSpace(name) == "" || strings.TrimSpace(createdBy) == "" {
+				return &cliError{Code: 2, Msg: "--name and --created-by-actor-id are required"}
+			}
+			payload := map[string]any{
+				"org_id":              resolvedOrgID,
+				"workspace_id":        resolvedWorkspaceID,
+				"name":                strings.TrimSpace(name),
+				"created_by_actor_id": strings.TrimSpace(createdBy),
+			}
+			if strings.TrimSpace(description) != "" {
+				payload["description"] = strings.TrimSpace(description)
+			}
+			status, body, _, err := rt.request(cmd.Context(), ctx, "POST", "/v1/service-accounts", nil, payload, true)
+			if err != nil {
+				return err
+			}
+			return rt.printResult(status, body)
+		},
+	}
+	cmd.Flags().StringVar(&orgID, "org-id", "", "organization id (defaults to context org_id)")
+	cmd.Flags().StringVar(&workspaceID, "workspace-id", "", "workspace id (defaults to context workspace_id)")
+	cmd.Flags().StringVar(&name, "name", "", "service account name")
+	cmd.Flags().StringVar(&description, "description", "", "service account description")
+	cmd.Flags().StringVar(&createdBy, "created-by-actor-id", "", "actor id creating service account")
+	return cmd
+}
+
+func newServiceAccountKeysCmd(rt *runtime) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "keys",
+		Short: "Manage service-account keys",
+	}
+	cmd.AddCommand(newServiceAccountKeysCreateCmd(rt), newServiceAccountKeysRevokeCmd(rt))
+	return cmd
+}
+
+func newServiceAccountKeysCreateCmd(rt *runtime) *cobra.Command {
+	var serviceAccountID, createdBy, expiresAt string
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create service-account key",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if serviceAccountID == "" || createdBy == "" {
+				return &cliError{Code: 2, Msg: "--service-account-id and --created-by-actor-id are required"}
+			}
+			payload := map[string]any{"created_by_actor_id": createdBy}
+			if expiresAt != "" {
+				payload["expires_at"] = expiresAt
+			}
+			status, body, _, err := rt.request(cmd.Context(), rt.effectiveContext(), "POST", "/v1/service-accounts/"+serviceAccountID+"/keys", nil, payload, true)
+			if err != nil {
+				return err
+			}
+			return rt.printResult(status, body)
+		},
+	}
+	cmd.Flags().StringVar(&serviceAccountID, "service-account-id", "", "service account id")
+	cmd.Flags().StringVar(&createdBy, "created-by-actor-id", "", "actor id creating key")
+	cmd.Flags().StringVar(&expiresAt, "expires-at", "", "optional ISO8601 expiration")
+	return cmd
+}
+
+func newServiceAccountKeysRevokeCmd(rt *runtime) *cobra.Command {
+	var serviceAccountID, keyID string
+	cmd := &cobra.Command{
+		Use:   "revoke",
+		Short: "Revoke service-account key",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if serviceAccountID == "" || keyID == "" {
+				return &cliError{Code: 2, Msg: "--service-account-id and --key-id are required"}
+			}
+			status, body, _, err := rt.request(cmd.Context(), rt.effectiveContext(), "POST", "/v1/service-accounts/"+serviceAccountID+"/keys/"+keyID+"/revoke", nil, nil, true)
+			if err != nil {
+				return err
+			}
+			return rt.printResult(status, body)
+		},
+	}
+	cmd.Flags().StringVar(&serviceAccountID, "service-account-id", "", "service account id")
+	cmd.Flags().StringVar(&keyID, "key-id", "", "key id")
+	return cmd
+}
+
 func newKeysListCmd(rt *runtime) *cobra.Command {
 	var serviceAccountID string
 	cmd := &cobra.Command{
@@ -990,50 +1155,11 @@ func newKeysListCmd(rt *runtime) *cobra.Command {
 }
 
 func newKeysCreateCmd(rt *runtime) *cobra.Command {
-	var serviceAccountID, createdBy, expiresAt string
-	cmd := &cobra.Command{
-		Use:   "create",
-		Short: "Create service-account key",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if serviceAccountID == "" || createdBy == "" {
-				return &cliError{Code: 2, Msg: "--service-account-id and --created-by-actor-id are required"}
-			}
-			payload := map[string]any{"created_by_actor_id": createdBy}
-			if expiresAt != "" {
-				payload["expires_at"] = expiresAt
-			}
-			status, body, _, err := rt.request(cmd.Context(), rt.effectiveContext(), "POST", "/v1/service-accounts/"+serviceAccountID+"/keys", nil, payload, true)
-			if err != nil {
-				return err
-			}
-			return rt.printResult(status, body)
-		},
-	}
-	cmd.Flags().StringVar(&serviceAccountID, "service-account-id", "", "service account id")
-	cmd.Flags().StringVar(&createdBy, "created-by-actor-id", "", "actor id creating key")
-	cmd.Flags().StringVar(&expiresAt, "expires-at", "", "optional ISO8601 expiration")
-	return cmd
+	return newServiceAccountKeysCreateCmd(rt)
 }
 
 func newKeysRevokeCmd(rt *runtime) *cobra.Command {
-	var serviceAccountID, keyID string
-	cmd := &cobra.Command{
-		Use:   "revoke",
-		Short: "Revoke service-account key",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if serviceAccountID == "" || keyID == "" {
-				return &cliError{Code: 2, Msg: "--service-account-id and --key-id are required"}
-			}
-			status, body, _, err := rt.request(cmd.Context(), rt.effectiveContext(), "POST", "/v1/service-accounts/"+serviceAccountID+"/keys/"+keyID+"/revoke", nil, nil, true)
-			if err != nil {
-				return err
-			}
-			return rt.printResult(status, body)
-		},
-	}
-	cmd.Flags().StringVar(&serviceAccountID, "service-account-id", "", "service account id")
-	cmd.Flags().StringVar(&keyID, "key-id", "", "key id")
-	return cmd
+	return newServiceAccountKeysRevokeCmd(rt)
 }
 
 func newStatusCmd(rt *runtime) *cobra.Command {
