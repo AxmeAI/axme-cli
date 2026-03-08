@@ -30,7 +30,11 @@ var (
 	date    = "unknown"
 )
 
-const defaultAlphaOnboardingURL = "https://cloud.axme.ai/alpha"
+const (
+	defaultAlphaOnboardingURL = "https://cloud.axme.ai/alpha/cli"
+	defaultCloudAPIBaseURL    = "https://api.cloud.axme.ai"
+	defaultLocalAPIBaseURL    = "http://127.0.0.1:8100"
+)
 
 type cliError struct {
 	Code int
@@ -166,7 +170,7 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 	var onboardingURL string
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Store CLI credentials via key input, web onboarding, or browser device flow",
+		Short: "Sign in, bootstrap alpha workspace, or store credentials",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if onboardingURL == "" {
 				onboardingURL = defaultAlphaOnboardingURL
@@ -177,6 +181,7 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 				if ctxName == "" {
 					ctxName = rt.activeContextName()
 				}
+				prepareCloudAlphaContext(rt.ensureContext(ctxName))
 				return rt.runDeviceLogin(cmd.Context(), ctxName)
 			}
 			if key == "" && token == "" {
@@ -187,27 +192,22 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 								fmt.Fprintf(os.Stderr, "warning: could not open browser automatically: %v\n", err)
 							}
 						}
-						enteredKey, err := promptLine("Paste AXME API key from onboarding page (or press Enter to cancel): ")
+						enteredKey, err := promptLine("Paste AXME API key (or press Enter to cancel): ")
 						if err != nil {
 							return err
 						}
 						key = enteredKey
 					} else {
-						enteredKey, err := promptLine("AXME API key (press Enter to open web onboarding): ")
+						enteredKey, err := promptLine("AXME API key (press Enter to start cloud alpha onboarding in CLI): ")
 						if err != nil {
 							return err
 						}
 						if enteredKey == "" {
-							if !noBrowser {
-								if err := openURLInBrowser(onboardingURL); err != nil && !rt.outputJSON {
-									fmt.Fprintf(os.Stderr, "warning: could not open browser automatically: %v\n", err)
-								}
+							ctxName := targetContext
+							if ctxName == "" {
+								ctxName = rt.activeContextName()
 							}
-							enteredFromWeb, err := promptLine("Paste AXME API key from onboarding page (or press Enter to cancel): ")
-							if err != nil {
-								return err
-							}
-							key = enteredFromWeb
+							return rt.runAlphaBootstrapLogin(cmd.Context(), ctxName)
 						} else {
 							key = enteredKey
 						}
@@ -216,7 +216,7 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 			}
 			if key == "" && token == "" {
 				msg := fmt.Sprintf(
-					"No credentials were stored. Use --api-key/--actor-token, or open %s to get a bootstrap key (then run `axme login --api-key <key>`).",
+					"No credentials were stored. Run `axme login` interactively to create or attach a cloud alpha workspace, use --api-key/--actor-token directly, or open %s for CLI onboarding instructions.",
 					onboardingURL,
 				)
 				if rt.outputJSON {
@@ -285,11 +285,106 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 	cmd.Flags().StringVar(&token, "bearer-token", "", "Bearer token")
 	cmd.Flags().StringVar(&owner, "owner-agent", "", "Owner agent (e.g. agent://alice)")
 	cmd.Flags().StringVar(&targetContext, "context", "", "Target context name")
-	cmd.Flags().BoolVar(&useWebOnboarding, "web", false, "open alpha onboarding form and prompt to paste issued API key")
+	cmd.Flags().BoolVar(&useWebOnboarding, "web", false, "legacy fallback")
 	cmd.Flags().BoolVar(&useDeviceFlow, "device", false, "browser device flow: open approval page and wait for confirmation (no copy-paste)")
 	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't try to open browser automatically during login")
-	cmd.Flags().StringVar(&onboardingURL, "onboarding-url", defaultAlphaOnboardingURL, "web onboarding URL for API key issuance")
+	cmd.Flags().StringVar(&onboardingURL, "onboarding-url", defaultAlphaOnboardingURL, "CLI onboarding page URL")
+	_ = cmd.Flags().MarkHidden("web")
+	_ = cmd.Flags().MarkHidden("onboarding-url")
 	return cmd
+}
+
+func (rt *runtime) runAlphaBootstrapLogin(ctx context.Context, ctxName string) error {
+	c := rt.ensureContext(ctxName)
+	prepareCloudAlphaContext(c)
+
+	if !rt.outputJSON {
+		fmt.Fprintln(os.Stderr, "Starting cloud alpha onboarding...")
+		fmt.Fprintf(os.Stderr, "Base URL: %s\n\n", c.BaseURL)
+	}
+
+	email, err := promptRequiredLine("Email: ")
+	if err != nil {
+		return err
+	}
+	company, err := promptLine("Company (optional): ")
+	if err != nil {
+		return err
+	}
+	useCase, err := promptRequiredLine("Use case (what are you building?): ")
+	if err != nil {
+		return err
+	}
+
+	payload := map[string]any{
+		"email":    email,
+		"use_case": useCase,
+	}
+	if strings.TrimSpace(company) != "" {
+		payload["company"] = strings.TrimSpace(company)
+	}
+
+	status, body, raw, err := rt.request(ctx, c, "POST", "/v1/alpha/bootstrap", nil, payload, true)
+	if err != nil {
+		return fmt.Errorf("alpha onboarding failed: %w", err)
+	}
+	if status >= 400 {
+		return fmt.Errorf("alpha onboarding failed (%d): %s", status, raw)
+	}
+
+	org := asMap(body["organization"])
+	workspace := asMap(body["workspace"])
+	keyBody := asMap(body["key"])
+	emailVerification := asMap(body["email_verification"])
+
+	apiKey := asString(keyBody["token"])
+	if apiKey == "" {
+		return fmt.Errorf("alpha onboarding succeeded but no API key was returned")
+	}
+
+	c.APIKey = apiKey
+	if orgID := asString(org["org_id"]); orgID != "" {
+		c.OrgID = orgID
+	}
+	if workspaceID := asString(workspace["workspace_id"]); workspaceID != "" {
+		c.WorkspaceID = workspaceID
+	}
+
+	if err := saveConfig(rt.cfgFile, rt.cfg); err != nil {
+		return err
+	}
+
+	result := map[string]any{
+		"ok":             true,
+		"context":        ctxName,
+		"base_url":       c.BaseURL,
+		"org_id":         c.OrgID,
+		"workspace_id":   c.WorkspaceID,
+		"organization":   org,
+		"workspace":      workspace,
+		"email":          asString(emailVerification["email"]),
+		"verify_status":  asString(emailVerification["status"]),
+		"verify_expires": asString(emailVerification["expires_at"]),
+	}
+	if rt.outputJSON {
+		return rt.printJSON(result)
+	}
+
+	fmt.Fprintln(os.Stderr, "Alpha workspace created and saved to your CLI context.")
+	fmt.Fprintf(os.Stderr, "Context:      %s\n", ctxName)
+	fmt.Fprintf(os.Stderr, "Organization: %s\n", asString(org["name"]))
+	fmt.Fprintf(os.Stderr, "org_id:       %s\n", c.OrgID)
+	fmt.Fprintf(os.Stderr, "Workspace:    %s\n", asString(workspace["name"]))
+	fmt.Fprintf(os.Stderr, "workspace_id: %s\n", c.WorkspaceID)
+	if emailAddress := asString(emailVerification["email"]); emailAddress != "" {
+		fmt.Fprintf(os.Stderr, "Email verify: pending for %s\n", emailAddress)
+	}
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Next commands:")
+	fmt.Fprintln(os.Stderr, "  axme whoami")
+	fmt.Fprintln(os.Stderr, "  axme quota show")
+	fmt.Fprintln(os.Stderr)
+	return nil
 }
 
 func newWhoamiCmd(rt *runtime) *cobra.Command {
@@ -1530,7 +1625,7 @@ func (rt *runtime) ensureContext(name string) *clientConfig {
 		c.normalizeActorToken()
 		return c
 	}
-	c = &clientConfig{BaseURL: "http://127.0.0.1:8100", Environment: "staging"}
+	c = &clientConfig{BaseURL: defaultLocalAPIBaseURL, Environment: "staging"}
 	rt.cfg.Contexts[name] = c
 	if rt.cfg.ActiveContext == "" {
 		rt.cfg.ActiveContext = name
@@ -1608,6 +1703,29 @@ func promptLine(prompt string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(line), nil
+}
+
+func promptRequiredLine(prompt string) (string, error) {
+	for {
+		value, err := promptLine(prompt)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value), nil
+		}
+		fmt.Fprintln(os.Stderr, "This field is required.")
+	}
+}
+
+func prepareCloudAlphaContext(c *clientConfig) {
+	baseURL := strings.TrimSpace(c.BaseURL)
+	if baseURL == "" || baseURL == defaultLocalAPIBaseURL {
+		c.BaseURL = defaultCloudAPIBaseURL
+	}
+	if strings.TrimSpace(c.Environment) == "" || strings.EqualFold(strings.TrimSpace(c.Environment), "staging") {
+		c.Environment = "cloud-alpha"
+	}
 }
 
 func openURLInBrowser(target string) error {
