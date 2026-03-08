@@ -1,0 +1,101 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag to publish (for example: v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: "go.mod"
+
+      - name: Resolve release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "VERSION_NO_V=${VERSION#v}" >> "${GITHUB_ENV}"
+          echo "BUILD_DATE=${BUILD_DATE}" >> "${GITHUB_ENV}"
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          while read -r GOOS GOARCH ARCHIVE_EXT; do
+            [ -n "${GOOS}" ] || continue
+            PACKAGE_DIR="axme_${VERSION_NO_V}_${GOOS}_${GOARCH}"
+            BINARY_NAME="axme"
+            if [ "${GOOS}" = "windows" ]; then
+              BINARY_NAME="axme.exe"
+            fi
+
+            rm -rf "dist/${PACKAGE_DIR}"
+            mkdir -p "dist/${PACKAGE_DIR}"
+
+            CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" \
+              go build \
+                -trimpath \
+                -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA} -X main.date=${BUILD_DATE}" \
+                -o "dist/${PACKAGE_DIR}/${BINARY_NAME}" \
+                ./cmd/axme
+
+            cp README.md "dist/${PACKAGE_DIR}/README.md"
+
+            if [ "${ARCHIVE_EXT}" = "zip" ]; then
+              (
+                cd dist
+                zip -rq "${PACKAGE_DIR}.zip" "${PACKAGE_DIR}"
+              )
+            else
+              tar -C dist -czf "dist/${PACKAGE_DIR}.tar.gz" "${PACKAGE_DIR}"
+            fi
+
+            rm -rf "dist/${PACKAGE_DIR}"
+          done <<'EOF'
+          linux amd64 tar.gz
+          linux arm64 tar.gz
+          darwin amd64 tar.gz
+          darwin arm64 tar.gz
+          windows amd64 zip
+          EOF
+
+          (
+            cd dist
+            sha256sum ./* > "axme_${VERSION_NO_V}_checksums.txt"
+          )
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            dist/*
