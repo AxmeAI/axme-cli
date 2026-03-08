@@ -3,7 +3,7 @@
 **Go CLI for the AXME platform.** Manage intent lifecycle, configure runtime contexts, inspect audit logs, and operate the platform from the terminal — single binary, no runtime dependencies.
 
 > **Alpha** · CLI surface is stabilizing. Not recommended for production scripting yet.  
-> Alpha access: https://cloud.axme.ai/alpha · Contact and suggestions: [hello@axme.ai](mailto:hello@axme.ai)
+> Alpha access: https://cloud.axme.ai/alpha/cli · Contact and suggestions: [hello@axme.ai](mailto:hello@axme.ai)
 
 ---
 
@@ -46,7 +46,7 @@ State and events can be accessed through:
 
 ## What You Can Do With the CLI
 
-- **Authenticate** — `axme login --web` opens the onboarding page and prompts to paste the issued API key; direct key/token input also supported
+- **Authenticate and onboard** — `axme login` is the primary cloud alpha entry point; direct key/token input is still supported
 - **Manage contexts** — configure and switch between multiple gateway environments (local, staging, production)
 - **Work with intents** — list, get, watch, cancel, retry, and resume intents in real time
 - **Operate agents and registry** — register, list, and resolve agent identities
@@ -96,7 +96,17 @@ go build -o ./bin/axme ./cmd/axme
 
 ## Quick Setup
 
-Before using the CLI, configure a context pointing to your AXME gateway:
+Preferred cloud alpha path:
+
+```bash
+axme login
+axme whoami
+axme quota show
+```
+
+`axme login` should guide a new user through the cloud alpha onboarding path, create or attach the first workspace, and save the resulting `api_key`, `org_id`, and `workspace_id` into the active context.
+
+Direct/manual context setup remains available:
 
 ```bash
 axme context set default \
@@ -109,11 +119,11 @@ axme context set default \
   --environment "production"
 
 axme context use default
-axme status        # check connectivity
-axme whoami        # verify identity
+axme status
+axme whoami
 ```
 
-`--api-key` maps to `x-api-key` (service-account/workspace key from `https://cloud.axme.ai/alpha`); `--actor-token` maps to `Authorization: Bearer ...` for actor-scoped routes.
+`--api-key` maps to `x-api-key` (service-account/workspace key from AXME Cloud alpha); `--actor-token` maps to `Authorization: Bearer ...` for actor-scoped routes.
 
 ---
 
@@ -152,10 +162,9 @@ For `corporate`, run `axme quota upgrade-request` to submit a review request.
 
 ### Authentication and Login
 ```bash
-axme login                           # interactive: prompts for API key or opens browser
+axme login                           # primary cloud alpha onboarding/login path
 axme login --api-key <key>           # non-interactive: store API key directly
-axme login --web                     # open cloud.axme.ai/alpha and prompt to paste returned key
-axme login --web --no-browser        # skip auto-open; print URL and prompt to paste key
+axme login --device                  # browser-assisted login flow when you already have a usable key/context
 axme login --actor-token <jwt>       # store an actor JWT for actor-scoped routes
 axme whoami                          # show current identity, context, and active sessions
 axme logout                          # clear credentials for the active context
@@ -306,6 +315,6 @@ go test ./...
 ## Contributing & Contact
 
 - Bug reports and feature requests: open an issue in this repository
-- Alpha access: https://cloud.axme.ai/alpha · Contact and suggestions: [hello@axme.ai](mailto:hello@axme.ai)
+- Alpha access: https://cloud.axme.ai/alpha/cli · Contact and suggestions: [hello@axme.ai](mailto:hello@axme.ai)
 - Security disclosures: see [SECURITY.md](SECURITY.md)
 - Contribution guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
