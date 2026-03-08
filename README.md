@@ -46,11 +46,13 @@ State and events can be accessed through:
 
 ## What You Can Do With the CLI
 
+- **Authenticate** — `axme login --web` opens the onboarding page and prompts to paste the issued API key; direct key/token input also supported
 - **Manage contexts** — configure and switch between multiple gateway environments (local, staging, production)
 - **Work with intents** — list, get, watch, cancel, retry, and resume intents in real time
 - **Operate agents and registry** — register, list, and resolve agent identities
 - **Stream logs and traces** — follow live intent event streams from the terminal
 - **Diagnose** — run `doctor` to check config, connectivity, and auth health
+- **Admin (platform owner)** — `axme admin` sub-commands for user management, quota overrides, scheduler health, and audit log (requires `platform_admin` JWT)
 
 ---
 
@@ -116,6 +118,17 @@ All API calls from the CLI are subject to platform rate limits. The quota model 
 
 ## Command Reference
 
+### Authentication and Login
+```bash
+axme login                           # interactive: prompts for API key or opens browser
+axme login --api-key <key>           # non-interactive: store API key directly
+axme login --web                     # open cloud.axme.ai/alpha and prompt to paste returned key
+axme login --web --no-browser        # skip auto-open; print URL and prompt to paste key
+axme login --actor-token <jwt>       # store an actor JWT for actor-scoped routes
+axme whoami                          # show current identity, context, and active sessions
+axme logout                          # clear credentials for the active context
+```
+
 ### Context Management
 ```bash
 axme context set <name> [flags]    # configure a new context
@@ -159,6 +172,23 @@ axme service-accounts create --org-id <org_id> --workspace-id <ws_id> --name <na
 axme service-accounts list --org-id <org_id> [--workspace-id <ws_id>]
 axme service-accounts keys create --service-account-id <sa_id> --created-by-actor-id <actor_id>
 axme service-accounts keys revoke --service-account-id <sa_id> --key-id <sak_id>
+```
+
+### Admin (Platform Owner — requires platform_admin JWT)
+```bash
+axme admin users list [--domain <prefix>] [--email <prefix>] [--limit <n>]
+axme admin users suspend --org-id <org_id> [--reason "<text>"]
+axme admin users unsuspend --org-id <org_id>
+
+axme admin quota get --org-id <org_id> --workspace-id <ws_id>
+axme admin quota set --org-id <org_id> --workspace-id <ws_id> \
+  --intents-per-day <n> [--actors-total <n>] [--service-accounts <n>]
+axme admin quota reset --org-id <org_id> --workspace-id <ws_id> \
+  --tier <unverified|email_verified|corporate>
+
+axme admin scheduler health          # GET /health with component table
+
+axme admin audit [--action <prefix>] [--owner-agent <agent>] [--limit <n>]
 ```
 
 ---
