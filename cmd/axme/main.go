@@ -149,6 +149,7 @@ func buildRoot(rt *runtime) *cobra.Command {
 		newDoctorCmd(rt),
 		newVersionCmd(rt),
 		newRawCmd(rt),
+		newAdminCmd(rt),
 	)
 	return cmd
 }
