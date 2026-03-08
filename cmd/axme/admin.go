@@ -29,6 +29,7 @@ Set bearer_token in the active context or AXME_BEARER_TOKEN env var.`,
 		newAdminQuotaCmd(rt),
 		newAdminSchedulerCmd(rt),
 		newAdminAuditCmd(rt),
+		newAdminAccessRequestsCmd(rt),
 	)
 	return cmd
 }
@@ -531,5 +532,151 @@ func newAdminAuditCmd(rt *runtime) *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum number of audit events (1–1000)")
 	cmd.Flags().StringVar(&actionPrefix, "action", "", "Filter by action prefix (e.g. alpha_bootstrap)")
 	cmd.Flags().StringVar(&ownerAgent, "owner-agent", "", "Filter by owner agent")
+	return cmd
+}
+
+// ---------------------------------------------------------------------------
+// axme admin access-requests
+// ---------------------------------------------------------------------------
+
+func newAdminAccessRequestsCmd(rt *runtime) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "access-requests",
+		Short: "Manage user quota-upgrade and access requests",
+	}
+	cmd.AddCommand(
+		newAdminAccessRequestsListCmd(rt),
+		newAdminAccessRequestsReviewCmd(rt),
+	)
+	return cmd
+}
+
+func newAdminAccessRequestsListCmd(rt *runtime) *cobra.Command {
+	var stateFilter string
+	var requestType string
+	var limit int
+
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List pending access / quota-upgrade requests",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			c := rt.effectiveContext()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			query := map[string]string{"limit": strconv.Itoa(limit)}
+			if stateFilter != "" {
+				query["state"] = stateFilter
+			}
+			if requestType != "" {
+				query["request_type"] = requestType
+			}
+
+			status, body, raw, err := rt.request(ctx, c, "GET", "/v1/portal/enterprise/access-requests", query, nil, true)
+			if err != nil {
+				return err
+			}
+			if status >= 400 {
+				return fmt.Errorf("server returned %d: %s", status, raw)
+			}
+			if rt.outputJSON {
+				fmt.Println(raw)
+				return nil
+			}
+
+			items := asSlice(body["access_requests"])
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "ID\tTYPE\tTIER\tSTATE\tREQUESTER\tCREATED")
+			for _, item := range items {
+				m := asMap(item)
+				tier := asString(m["requested_tier"])
+				if tier == "" {
+					tier = "-"
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+					asString(m["access_request_id"]),
+					asString(m["request_type"]),
+					tier,
+					asString(m["state"]),
+					asString(m["requester_actor_id"]),
+					asString(m["created_at"]),
+				)
+			}
+			return w.Flush()
+		},
+	}
+	cmd.Flags().StringVar(&stateFilter, "state", "pending", "Filter by state: pending, under_review, approved, rejected, waitlisted")
+	cmd.Flags().StringVar(&requestType, "type", "", "Filter by request_type (e.g. quota_upgrade)")
+	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum number of results (1–500)")
+	return cmd
+}
+
+func newAdminAccessRequestsReviewCmd(rt *runtime) *cobra.Command {
+	var requestID string
+	var decision string
+	var reviewerActorID string
+	var comment string
+
+	cmd := &cobra.Command{
+		Use:   "review",
+		Short: "Approve, reject, or waitlist an access/quota-upgrade request",
+		Long: `Review an access or quota-upgrade request.
+
+Decision values:
+  approve   — grant the request (quota_upgrade requests auto-apply the tier)
+  reject    — deny the request
+  waitlist  — defer for later review`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if strings.TrimSpace(requestID) == "" {
+				return fmt.Errorf("--id is required")
+			}
+			valid := map[string]bool{"approve": true, "reject": true, "waitlist": true}
+			if !valid[strings.TrimSpace(decision)] {
+				return fmt.Errorf("--decision must be one of: approve, reject, waitlist")
+			}
+			if strings.TrimSpace(reviewerActorID) == "" {
+				return fmt.Errorf("--reviewer-actor-id is required")
+			}
+
+			c := rt.effectiveContext()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			payload := map[string]any{
+				"decision":          strings.TrimSpace(decision),
+				"reviewer_actor_id": strings.TrimSpace(reviewerActorID),
+			}
+			if comment != "" {
+				payload["review_comment"] = comment
+			}
+
+			path := fmt.Sprintf("/v1/access-requests/%s/review", strings.TrimSpace(requestID))
+			status, body, raw, err := rt.request(ctx, c, "POST", path, nil, payload, true)
+			if err != nil {
+				return err
+			}
+			if status >= 400 {
+				return fmt.Errorf("server returned %d: %s", status, raw)
+			}
+			if rt.outputJSON {
+				fmt.Println(raw)
+				return nil
+			}
+
+			ar := asMap(body["access_request"])
+			fmt.Printf("Access request %s → %s\n", asString(ar["access_request_id"]), asString(ar["state"]))
+			if tier := asString(ar["requested_tier"]); tier != "" && decision == "approve" {
+				fmt.Printf("Quota tier '%s' has been applied to the workspace.\n", tier)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&requestID, "id", "", "Access request ID (required)")
+	cmd.Flags().StringVar(&decision, "decision", "", "Decision: approve, reject, or waitlist (required)")
+	cmd.Flags().StringVar(&reviewerActorID, "reviewer-actor-id", "", "Actor ID of the reviewer (required)")
+	cmd.Flags().StringVar(&comment, "comment", "", "Optional review comment")
+	_ = cmd.MarkFlagRequired("id")
+	_ = cmd.MarkFlagRequired("decision")
+	_ = cmd.MarkFlagRequired("reviewer-actor-id")
 	return cmd
 }

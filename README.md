@@ -52,7 +52,8 @@ State and events can be accessed through:
 - **Operate agents and registry** — register, list, and resolve agent identities
 - **Stream logs and traces** — follow live intent event streams from the terminal
 - **Diagnose** — run `doctor` to check config, connectivity, and auth health
-- **Admin (platform owner)** — `axme admin` sub-commands for user management, quota overrides, scheduler health, and audit log (requires `platform_admin` JWT)
+- **Quota** — `axme quota show` to view limits and usage; `axme quota upgrade-request` to request a corporate-tier upgrade
+- **Admin (platform owner)** — `axme admin` sub-commands for user management, quota overrides, access-request review, scheduler health, and audit log (requires `platform_admin` JWT)
 
 ---
 
@@ -114,6 +115,17 @@ All API calls from the CLI are subject to platform rate limits. The quota model 
 
 *When a rate limit is hit, the CLI displays a `429 Too Many Requests` error with a `Retry-After` value. Retry the command after the indicated wait window.*
 
+Alpha quota tiers:
+
+| Tier | intents/day | actors | service accounts |
+|---|---|---|---|
+| unverified | 50 | 5 | 2 |
+| email_verified | 500 | 20 | 10 |
+| corporate | 5 000 | 200 | 50 |
+
+Email verification upgrades you automatically from `unverified` → `email_verified`.  
+For `corporate`, run `axme quota upgrade-request` to submit a review request.
+
 ---
 
 ## Command Reference
@@ -174,6 +186,32 @@ axme service-accounts keys create --service-account-id <sa_id> --created-by-acto
 axme service-accounts keys revoke --service-account-id <sa_id> --key-id <sak_id>
 ```
 
+### Quota
+```bash
+# View your current limits and usage
+axme quota show
+
+# Request a corporate-tier upgrade (reviewed within 1 business day)
+axme quota upgrade-request \
+  --company "Acme Corp" \
+  --justification "Running a production pilot with ~50 agents"
+
+# Optional: request a specific tier (default: corporate)
+axme quota upgrade-request --company "..." --justification "..." --tier corporate
+```
+
+`axme quota show` output example:
+```
+DIMENSION                   USED  LIMIT  USAGE%
+intents per day             48    50     96% ⚠
+actors total                3     5      60%
+service accounts per workspace  1     2      50%
+
+overage_mode=block  hard_enforcement=true
+
+To request higher limits: axme quota upgrade-request --company "..." --justification "..."
+```
+
 ### Admin (Platform Owner — requires platform_admin JWT)
 ```bash
 axme admin users list [--domain <prefix>] [--email <prefix>] [--limit <n>]
@@ -189,7 +227,17 @@ axme admin quota reset --org-id <org_id> --workspace-id <ws_id> \
 axme admin scheduler health          # GET /health with component table
 
 axme admin audit [--action <prefix>] [--owner-agent <agent>] [--limit <n>]
+
+# Review quota upgrade and access requests submitted by users
+axme admin access-requests list [--state pending] [--type quota_upgrade] [--limit <n>]
+axme admin access-requests review \
+  --id <request_id> \
+  --decision <approve|reject|waitlist> \
+  --reviewer-actor-id <actor_id> \
+  [--comment "<text>"]
 ```
+
+Approving a `quota_upgrade` request automatically applies the requested tier to the user's workspace — no manual quota override needed.
 
 ---
 
