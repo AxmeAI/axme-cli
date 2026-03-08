@@ -96,7 +96,7 @@ axme whoami        # verify identity
 
 ## Create and Control Sequence
 
-The sequence diagram below shows what happens at the network level when you run `axme intents create` — from CLI to gateway to scheduler:
+The sequence diagram below shows what happens at the network level when you run `axme run` — from CLI to gateway to scheduler:
 
 ![Create and Control Sequence](docs/diagrams/02-create-and-control-sequence.svg)
 
@@ -110,7 +110,7 @@ All API calls from the CLI are subject to platform rate limits. The quota model 
 
 ![Rate Limit and Quota Model](docs/diagrams/04-rate-limit-and-quota-model.svg)
 
-*When a rate limit is hit, the CLI displays a `429 Too Many Requests` error with a `Retry-After` value. Use `--rate-limit-wait` to auto-retry within the wait window.*
+*When a rate limit is hit, the CLI displays a `429 Too Many Requests` error with a `Retry-After` value. Retry the command after the indicated wait window.*
 
 ---
 
@@ -137,7 +137,7 @@ axme intents resume <intent_id>
 ### Agents and Registry
 ```bash
 axme agents list
-axme agents register --nick "@name" --display-name "..."
+axme agents register --name "<name>" --capability "<capability>" --endpoint-url "<url>"
 axme agents resolve "@name"
 ```
 
@@ -169,7 +169,7 @@ For teams doing performance analysis or capacity planning:
 
 ![Capacity and Latency Budget](docs/diagrams/04-capacity-latency-budget.svg)
 
-*The CLI adds negligible latency overhead. Gateway p99 is the dominant term. Use `axme raw` with `--trace` to capture full timing breakdowns.*
+*The CLI adds negligible latency overhead. Gateway p99 is the dominant term. Use `axme raw` to send a custom request and inspect the raw response for debugging.*
 
 ---
 
