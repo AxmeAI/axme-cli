@@ -71,7 +71,7 @@ resolve_version() {
   fi
 
   json="$(http_get "https://api.github.com/repos/${REPO}/releases/latest" | tr -d '\n')"
-  version="$(printf '%s' "$json" | sed -n 's/.*"tag_name":"\([^"]*\)".*/\1/p')"
+  version="$(printf '%s' "$json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
   [ -n "$version" ] || fail "could not resolve latest release version"
   printf '%s' "$version"
 }
@@ -81,7 +81,7 @@ verify_checksum() {
   asset_path="$2"
   checksums_path="$3"
 
-  expected="$(awk "/  ${asset_name}\$/ {print \$1}" "$checksums_path")"
+  expected="$(awk -v asset="./${asset_name}" '$2 == asset {print $1}' "$checksums_path")"
   [ -n "$expected" ] || fail "checksum for ${asset_name} not found"
 
   if need_cmd sha256sum; then
@@ -143,4 +143,4 @@ esac
 log ""
 log "Next steps:"
 log "  axme version"
-log "  axme login --web"
+log "  axme login"
