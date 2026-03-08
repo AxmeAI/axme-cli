@@ -161,14 +161,23 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 	var owner string
 	var targetContext string
 	var useWebOnboarding bool
+	var useDeviceFlow bool
 	var noBrowser bool
 	var onboardingURL string
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Store CLI credentials via key input or web onboarding",
+		Short: "Store CLI credentials via key input, web onboarding, or browser device flow",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if onboardingURL == "" {
 				onboardingURL = defaultAlphaOnboardingURL
+			}
+			// Device/browser flow: no API key required upfront
+			if useDeviceFlow {
+				ctxName := targetContext
+				if ctxName == "" {
+					ctxName = rt.activeContextName()
+				}
+				return rt.runDeviceLogin(cmd.Context(), ctxName)
 			}
 			if key == "" && token == "" {
 				if interactiveInputAvailable() {
@@ -235,13 +244,40 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 			if owner != "" {
 				ctx.OwnerAgent = strings.TrimSpace(owner)
 			}
+			var hydrated bool
+			var hydrateWarning string
+			if resolvedContext, err := rt.hydrateContextFromServer(cmd.Context(), ctx); err == nil {
+				hydrated = true
+				if resolvedOrgID := asString(resolvedContext["org_id"]); resolvedOrgID != "" {
+					ctx.OrgID = resolvedOrgID
+				}
+				if resolvedWorkspaceID := asString(resolvedContext["workspace_id"]); resolvedWorkspaceID != "" {
+					ctx.WorkspaceID = resolvedWorkspaceID
+				}
+			} else {
+				hydrateWarning = err.Error()
+				if !rt.outputJSON {
+					fmt.Fprintf(
+						os.Stderr,
+						"warning: saved credentials, but could not resolve default org/workspace automatically: %v\n",
+						err,
+					)
+				}
+			}
 			if err := saveConfig(rt.cfgFile, rt.cfg); err != nil {
 				return err
 			}
-			return rt.printResult(200, map[string]any{
-				"ok":      true,
-				"context": ctxName,
-			})
+			body := map[string]any{
+				"ok":           true,
+				"context":      ctxName,
+				"hydrated":     hydrated,
+				"org_id":       ctx.OrgID,
+				"workspace_id": ctx.WorkspaceID,
+			}
+			if hydrateWarning != "" {
+				body["warning"] = hydrateWarning
+			}
+			return rt.printResult(200, body)
 		},
 	}
 	cmd.Flags().StringVar(&key, "api-key", "", "API key")
@@ -250,6 +286,7 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 	cmd.Flags().StringVar(&owner, "owner-agent", "", "Owner agent (e.g. agent://alice)")
 	cmd.Flags().StringVar(&targetContext, "context", "", "Target context name")
 	cmd.Flags().BoolVar(&useWebOnboarding, "web", false, "open alpha onboarding form and prompt to paste issued API key")
+	cmd.Flags().BoolVar(&useDeviceFlow, "device", false, "browser device flow: open approval page and wait for confirmation (no copy-paste)")
 	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't try to open browser automatically during login")
 	cmd.Flags().StringVar(&onboardingURL, "onboarding-url", defaultAlphaOnboardingURL, "web onboarding URL for API key issuance")
 	return cmd
@@ -1398,6 +1435,24 @@ func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path st
 		_ = json.Unmarshal(rawBody, &out)
 	}
 	return resp.StatusCode, out, rawStr, nil
+}
+
+func (rt *runtime) hydrateContextFromServer(ctx context.Context, c *clientConfig) (map[string]any, error) {
+	status, body, raw, err := rt.request(ctx, c, "GET", "/v1/portal/personal/context", nil, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("context resolution returned %d: %s", status, raw)
+	}
+	resolvedContext := asMap(body["context"])
+	if len(resolvedContext) == 0 {
+		return nil, fmt.Errorf("context resolution response is missing context")
+	}
+	if asString(resolvedContext["org_id"]) == "" || asString(resolvedContext["workspace_id"]) == "" {
+		return nil, fmt.Errorf("context resolution response is missing org_id/workspace_id")
+	}
+	return resolvedContext, nil
 }
 
 func (rt *runtime) applyAuthHeaders(req *http.Request, c *clientConfig) {

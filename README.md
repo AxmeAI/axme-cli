@@ -59,6 +59,26 @@ State and events can be accessed through:
 
 ## Install
 
+Recommended install path (Linux/macOS, no Go required):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AxmeAI/axme-cli/main/install.sh | sh
+```
+
+Install a specific released version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AxmeAI/axme-cli/main/install.sh | AXME_VERSION=v0.1.0 sh
+```
+
+Manual downloads:
+
+- GitHub Releases: https://github.com/AxmeAI/axme-cli/releases
+- Linux/macOS archives are published as `tar.gz`
+- Windows archives are published as `zip`
+
+Go-based install remains available for contributors and local development:
+
 ```bash
 go install github.com/AxmeAI/axme-cli/cmd/axme@latest
 ```
