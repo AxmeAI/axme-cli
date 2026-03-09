@@ -142,7 +142,7 @@ axme whoami
 
 The sequence diagram below shows what happens at the network level when you run `axme run` — from CLI to gateway to scheduler:
 
-![Create and Control Sequence](docs/diagrams/02-create-and-control-sequence.svg)
+![Create and Control Sequence](https://raw.githubusercontent.com/AxmeAI/axme-docs/main/docs/diagrams/intents/02-create-and-control-sequence.svg)
 
 *The CLI sets idempotency keys and correlation IDs on every request. The gateway authenticates, validates, and persists the intent. Status is polled and streamed back to the terminal.*
 
@@ -152,7 +152,7 @@ The sequence diagram below shows what happens at the network level when you run 
 
 All API calls from the CLI are subject to platform rate limits. The quota model below shows how limits are applied per org, workspace, and API key:
 
-![Rate Limit and Quota Model](docs/diagrams/04-rate-limit-and-quota-model.svg)
+![Rate Limit and Quota Model](https://raw.githubusercontent.com/AxmeAI/axme-docs/main/docs/diagrams/api/04-rate-limit-and-quota-model.svg)
 
 *When a rate limit is hit, the CLI displays a `429 Too Many Requests` error with a `Retry-After` value. Retry the command after the indicated wait window.*
 
@@ -288,7 +288,7 @@ Platform-operator workflows are intentionally not part of the public `axme` user
 
 For teams doing performance analysis or capacity planning:
 
-![Capacity and Latency Budget](docs/diagrams/04-capacity-latency-budget.svg)
+![Capacity and Latency Budget](https://raw.githubusercontent.com/AxmeAI/axme-docs/main/docs/diagrams/operations/04-capacity-latency-budget.svg)
 
 *The CLI adds negligible latency overhead. Gateway p99 is the dominant term. Use `axme raw` to send a custom request and inspect the raw response for debugging.*
 
@@ -301,7 +301,6 @@ axme-cli/
 ├── cmd/
 │   └── axme/                  # main entry point and command tree
 ├── docs/
-│   ├── diagrams/              # Diagram copies for README embedding
 │   └── commands/              # Per-command reference pages
 └── go.mod
 ```
