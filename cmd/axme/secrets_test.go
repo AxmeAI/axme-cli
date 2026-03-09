@@ -534,7 +534,7 @@ func TestDoctorChecksReportServerPersonalContextAndCacheMisalignment(t *testing.
 	if asBool(byName["secret_storage_mode"]["ok"]) {
 		t.Fatalf("expected secret_storage_mode to be warning (ok=false) for explicit file store, got %#v", byName["secret_storage_mode"])
 	}
-	if got := asString(byName["secret_storage_mode"]["detail"]); !strings.Contains(got, axmeCLISecretStorageEnv+"=file") {
+	if got := asString(byName["secret_storage_mode"]["detail"]); !strings.Contains(got, "explicit") {
 		t.Fatalf("expected file fallback warning detail, got %q", got)
 	}
 	if !asBool(byName["personal_context"]["ok"]) {

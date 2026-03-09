@@ -2144,10 +2144,14 @@ func (rt *runtime) doctorChecks(ctx context.Context, c *clientConfig) []map[stri
 		if fs, ok := rt.secretStore.(*fileSecretStore); ok && fs.autoFallback {
 			isAutoFallback = true
 		}
+		modeDetail := "file (auto-fallback; keyring unavailable)"
+		if !isAutoFallback {
+			modeDetail = "file (explicit)"
+		}
 		checks = append(checks, map[string]any{
 			"check":  "secret_storage_mode",
 			"ok":     isAutoFallback,
-			"detail": warning,
+			"detail": modeDetail,
 		})
 	}
 	_, body, _, err := rt.request(ctx, c, "GET", "/health", nil, nil, true)
@@ -2789,20 +2793,12 @@ func serviceAccountListGuidance(c *clientConfig, orgID string, workspaceID strin
 	return fmt.Sprintf("Listing organization-wide service accounts for org %s. Pass `--workspace-id <workspace-id>` to narrow the view.", orgID)
 }
 
-func serviceAccountAdminRequirementMessage(detail string) string {
-	base := "This command requires an account session with organization or workspace admin access, plus a valid workspace or platform API key. Run `axme login`, select the right workspace, and try again."
-	if strings.TrimSpace(detail) == "" {
-		return base
-	}
-	return fmt.Sprintf("%s Server detail: %s", base, detail)
+func serviceAccountAdminRequirementMessage(_ string) string {
+	return "This command requires an account session with organization or workspace admin access, plus a valid workspace or platform API key. Run `axme login`, select the right workspace, and try again."
 }
 
-func serviceAccountPlatformAPIKeyRequirementMessage(detail string) string {
-	base := "This command requires a workspace or platform API key in the active context. Set the right API key or select the right workspace context, then try again."
-	if strings.TrimSpace(detail) == "" {
-		return base
-	}
-	return fmt.Sprintf("%s Server detail: %s", base, detail)
+func serviceAccountPlatformAPIKeyRequirementMessage(_ string) string {
+	return "This command requires a workspace or platform API key in the active context. Set the right API key or select the right workspace context, then try again."
 }
 
 func (rt *runtime) resolveServiceAccountListContext(ctx context.Context, c *clientConfig, overrideOrgID, overrideWorkspaceID string) (string, string, error) {
@@ -2920,14 +2916,8 @@ func (rt *runtime) personalWorkspaceSelectionAPIError(status int, body map[strin
 	return fmt.Errorf("workspace selection returned %d: %s", status, raw)
 }
 
-func enterpriseMemberRequirementMessage(detail string) string {
-	if strings.TrimSpace(detail) == "" {
-		return "This command requires an account session with organization or workspace admin access. Run `axme login`, select the right workspace, and try again."
-	}
-	return fmt.Sprintf(
-		"This command requires an account session with organization or workspace admin access. Run `axme login`, select the right workspace, and try again. Server detail: %s",
-		detail,
-	)
+func enterpriseMemberRequirementMessage(_ string) string {
+	return "This command requires an account session with organization or workspace admin access. Run `axme login`, select the right workspace, and try again."
 }
 
 func enterpriseMemberScopeMessage(detail string) string {
