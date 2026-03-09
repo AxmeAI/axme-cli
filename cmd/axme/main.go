@@ -132,8 +132,10 @@ func run() int {
 
 func buildRoot(rt *runtime) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "axme",
-		Short: "Axme B2B infra CLI",
+		Use:          "axme",
+		Short:        "Axme B2B infra CLI",
+		SilenceUsage: true,
+		SilenceErrors: true,
 	}
 	cmd.PersistentFlags().BoolVar(&rt.outputJSON, "json", false, "machine-readable JSON output")
 	cmd.PersistentFlags().StringVar(&rt.contextName, "context-name", "", "override active context name")
@@ -404,12 +406,11 @@ func newWhoamiCmd(rt *runtime) *cobra.Command {
 				return err
 			}
 			out := map[string]any{
-				"context":      rt.activeContextName(),
-				"base_url":     ctx.BaseURL,
-				"org_id":       ctx.OrgID,
+				"context":     rt.activeContextName(),
+				"base_url":    ctx.BaseURL,
+				"org_id":      ctx.OrgID,
 				"workspace_id": ctx.WorkspaceID,
-				"owner_agent":  ctx.OwnerAgent,
-				"environment":  ctx.Environment,
+				"environment": ctx.Environment,
 				"secret_storage": map[string]any{
 					"mode":   rt.secretStore.Mode(),
 					"detail": rt.secretStore.Detail(),
@@ -420,6 +421,11 @@ func newWhoamiCmd(rt *runtime) *cobra.Command {
 					"has_local_workspace_cache":  ctx.OrgID != "" && ctx.WorkspaceID != "",
 				},
 			}
+			if ctx.OwnerAgent != "" {
+				out["owner_agent"] = ctx.OwnerAgent
+			}
+
+			var serverContextHint string
 			if personalContext, err := rt.personalContextFromServer(cmd.Context(), ctx); err == nil {
 				out["server_context"] = asMap(personalContext["context"])
 				if account := asMap(personalContext["account"]); len(account) > 0 {
@@ -440,7 +446,9 @@ func newWhoamiCmd(rt *runtime) *cobra.Command {
 				status["membership_count"] = len(asSlice(personalContext["workspaces"]))
 				out["status"] = status
 			} else {
-				out["server_context_error"] = err.Error()
+				// Only include hint in JSON output; human output prints it inline below.
+				serverContextHint = "Not signed in — run `axme login` to connect your account."
+				out["hint"] = serverContextHint
 			}
 			if ctx.resolvedActorToken() != "" {
 				sessions, err := rt.listAccountSessions(cmd.Context(), ctx, false)
@@ -451,7 +459,58 @@ func newWhoamiCmd(rt *runtime) *cobra.Command {
 					out["sessions_error"] = err.Error()
 				}
 			}
-			return rt.printGeneric(out)
+
+			if rt.outputJSON {
+				return rt.printJSON(out)
+			}
+
+			// Human-readable output
+			ctxName := rt.activeContextName()
+			status := asMap(out["status"])
+			fmt.Printf("Context:       %s\n", ctxName)
+			fmt.Printf("API endpoint:  %s\n", ctx.BaseURL)
+			if ctx.OrgID != "" {
+				fmt.Printf("Org ID:        %s\n", ctx.OrgID)
+			}
+			if ctx.WorkspaceID != "" {
+				fmt.Printf("Workspace ID:  %s\n", ctx.WorkspaceID)
+			}
+			if ctx.OwnerAgent != "" {
+				fmt.Printf("Owner agent:   %s\n", ctx.OwnerAgent)
+			}
+			fmt.Printf("Environment:   %s\n", ctx.Environment)
+			fmt.Println()
+
+			if asBool(status["has_workspace_access_token"]) {
+				fmt.Println("Workspace access: active")
+			} else {
+				fmt.Println("Workspace access: none (run `axme login`)")
+			}
+			if asBool(status["has_account_session"]) {
+				fmt.Println("Account session:  active")
+				if account := asMap(out["account"]); len(account) > 0 {
+					if email := asString(account["email"]); email != "" {
+						fmt.Printf("Account email:    %s\n", email)
+					}
+				}
+			} else {
+				fmt.Println("Account session:  none")
+				fmt.Println()
+				fmt.Println("  Run `axme login` to sign in with your email address.")
+			}
+			if serverContextHint == "" {
+				if selectedWS := asMap(out["selected_workspace"]); len(selectedWS) > 0 {
+					label := asString(selectedWS["name"])
+					if label == "" {
+						label = asString(selectedWS["workspace_id"])
+					}
+					fmt.Printf("\nSelected workspace: %s\n", label)
+				}
+				if cnt, ok := status["membership_count"].(float64); ok && cnt > 0 {
+					fmt.Printf("Visible workspaces: %d (run `axme workspace list`)\n", int(cnt))
+				}
+			}
+			return nil
 		},
 	}
 }
@@ -974,7 +1033,7 @@ func newLogoutCmd(rt *runtime) *cobra.Command {
 			}
 			serverResult["local_account_session_present"] = false
 			serverResult["local_workspace_api_key_present"] = !all && ctx.APIKey != ""
-			return rt.printResult(200, map[string]any{
+			body := map[string]any{
 				"ok":                              true,
 				"context":                         rt.activeContextName(),
 				"api_key_cleared":                 all,
@@ -984,7 +1043,26 @@ func newLogoutCmd(rt *runtime) *cobra.Command {
 				"local_workspace_api_key_present": !all && ctx.APIKey != "",
 				"server_logout":                   serverResult,
 				"guidance_message":                logoutGuidanceMessage(all, serverResult),
-			})
+			}
+			if rt.outputJSON {
+				return rt.printJSON(body)
+			}
+			guidanceMsg := logoutGuidanceMessage(all, serverResult)
+			if all {
+				fmt.Printf("Signed out of context %q. Workspace API key and account session cleared.\n", rt.activeContextName())
+			} else {
+				fmt.Printf("Signed out of context %q. Account session cleared.\n", rt.activeContextName())
+				if !all && ctx.APIKey != "" {
+					fmt.Println("Workspace API key retained. Use --all to also clear the API key.")
+				}
+			}
+			if serverResult["revoked"] == true {
+				fmt.Println("Server-side session revoked.")
+			}
+			if guidanceMsg != "" && serverResult["attempted"] == true {
+				fmt.Println(guidanceMsg)
+			}
+			return nil
 		},
 		Args: cobra.NoArgs,
 	}
@@ -1999,11 +2077,34 @@ func newStatusCmd(rt *runtime) *cobra.Command {
 		Short: "Health and connectivity status",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := rt.effectiveContext()
-			status, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/health", nil, nil, true)
+			status, body, raw, err := rt.request(cmd.Context(), ctx, "GET", "/health", nil, nil, true)
 			if err != nil {
-				return err
+				return fmt.Errorf("could not reach gateway at %s: %w", ctx.BaseURL, err)
 			}
-			return rt.printResult(status, body)
+			if rt.outputJSON {
+				return rt.printJSON(map[string]any{"status_code": status, "ok": status < 400, "body": body})
+			}
+			if status >= 400 {
+				return fmt.Errorf("gateway returned %d: %s", status, raw)
+			}
+			svc := asString(body["service"])
+			if svc == "" {
+				svc = "gateway"
+			}
+			profile := asString(body["deployment_profile"])
+			storage := asString(body["storage"])
+			fmt.Printf("Gateway:    %s (ok)\n", ctx.BaseURL)
+			fmt.Printf("Service:    %s\n", svc)
+			if profile != "" {
+				fmt.Printf("Profile:    %s\n", profile)
+			}
+			if storage != "" {
+				fmt.Printf("Storage:    %s\n", storage)
+			}
+			if registered, ok := body["registered_users"].(float64); ok {
+				fmt.Printf("Users:      %d registered\n", int(registered))
+			}
+			return nil
 		},
 	}
 }
@@ -2039,14 +2140,24 @@ func (rt *runtime) doctorChecks(ctx context.Context, c *clientConfig) []map[stri
 		{"check": "secret_storage", "ok": rt.secretStore != nil, "detail": secretStorageDetail},
 	}
 	if warning := secretStorageFallbackWarning(rt.secretStore); warning != "" {
+		isAutoFallback := false
+		if fs, ok := rt.secretStore.(*fileSecretStore); ok && fs.autoFallback {
+			isAutoFallback = true
+		}
 		checks = append(checks, map[string]any{
-			"check":  "secret_storage_fallback",
-			"ok":     false,
+			"check":  "secret_storage_mode",
+			"ok":     isAutoFallback,
 			"detail": warning,
 		})
 	}
 	_, body, _, err := rt.request(ctx, c, "GET", "/health", nil, nil, true)
-	checks = append(checks, map[string]any{"check": "health_endpoint", "ok": err == nil, "detail": body})
+	healthDetail := "ok"
+	if err != nil {
+		healthDetail = err.Error()
+	} else if svc := asString(body["service"]); svc != "" {
+		healthDetail = fmt.Sprintf("service=%s ok", svc)
+	}
+	checks = append(checks, map[string]any{"check": "health_endpoint", "ok": err == nil, "detail": healthDetail})
 
 	if c.resolvedActorToken() == "" {
 		msg := personalContextRequirementMessage("")
@@ -2141,8 +2252,16 @@ func secretStorageFallbackWarning(store secretStore) string {
 	if store == nil || store.Mode() != "file" {
 		return ""
 	}
+	if fs, ok := store.(*fileSecretStore); ok && fs.autoFallback {
+		// Quiet fallback: keyring unavailable, silently using file. Print only once.
+		return fmt.Sprintf(
+			"Note: OS keyring unavailable; credentials are stored in %s. Set %s=keyring if running a desktop environment.",
+			store.Detail(),
+			axmeCLISecretStorageEnv,
+		)
+	}
 	return fmt.Sprintf(
-		"Warning: %s=file enables explicit file-based secret fallback at %s. Secrets stay out of config.json but are not stored in OS keyring storage; use this only in headless or CI environments.",
+		"Warning: %s=file enabled; credentials stored in plaintext at %s. Use only in headless or CI environments.",
 		axmeCLISecretStorageEnv,
 		store.Detail(),
 	)
@@ -2153,7 +2272,11 @@ func newVersionCmd(rt *runtime) *cobra.Command {
 		Use:   "version",
 		Short: "Print CLI version",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return rt.printGeneric(map[string]any{"version": version, "commit": commit, "date": date})
+			if rt.outputJSON {
+				return rt.printJSON(map[string]any{"version": version, "commit": commit, "date": date})
+			}
+			fmt.Printf("axme %s (%s, %s)\n", version, commit, date)
+			return nil
 		},
 	}
 }
@@ -2348,13 +2471,53 @@ func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path st
 }
 
 func personalContextRequirementMessage(detail string) string {
-	if strings.TrimSpace(detail) == "" {
-		return "This command requires an account session. Run `axme login` to sign in, then try again."
+	return "This command requires an account session. Run `axme login` to sign in, then try again."
+}
+
+// httpErrorMessage converts a non-2xx HTTP status and raw response body into a
+// human-readable error message, promoting well-known error codes to actionable
+// guidance.
+func httpErrorMessage(status int, raw string) string {
+	// Try to extract a machine-readable error code from the response body.
+	var parsed struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		Detail string `json:"detail"`
 	}
-	return fmt.Sprintf(
-		"This command requires an account session. Run `axme login` to sign in, then try again. Server detail: %s",
-		detail,
-	)
+	_ = json.Unmarshal([]byte(raw), &parsed)
+
+	code := parsed.Error.Code
+	switch {
+	case status == 401 && (code == "missing_actor_token" || code == "missing_api_key" || code == "unauthorized"):
+		return "Not authenticated. Run `axme login` to sign in."
+	case status == 401:
+		return "Authentication failed. Run `axme login` to sign in."
+	case status == 403:
+		return "Permission denied. You may not have the required role for this action."
+	case status == 404:
+		msg := parsed.Error.Message
+		if msg == "" {
+			msg = parsed.Detail
+		}
+		if msg != "" {
+			return fmt.Sprintf("Not found: %s", msg)
+		}
+		return "Not found."
+	case status == 429:
+		return "Rate limit exceeded. Please wait before retrying."
+	case status >= 500:
+		return fmt.Sprintf("Server error (%d). Please try again later.", status)
+	default:
+		if parsed.Error.Message != "" {
+			return fmt.Sprintf("Request failed (%d): %s", status, parsed.Error.Message)
+		}
+		if parsed.Detail != "" {
+			return fmt.Sprintf("Request failed (%d): %s", status, parsed.Detail)
+		}
+		return fmt.Sprintf("Request failed (%d).", status)
+	}
 }
 
 func (rt *runtime) personalContextFromServer(ctx context.Context, c *clientConfig) (map[string]any, error) {

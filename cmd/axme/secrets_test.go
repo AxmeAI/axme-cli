@@ -520,10 +520,21 @@ func TestDoctorChecksReportServerPersonalContextAndCacheMisalignment(t *testing.
 	if !asBool(byName["secret_storage"]["ok"]) || !strings.Contains(asString(byName["secret_storage"]["detail"]), "file") {
 		t.Fatalf("expected secret_storage to describe file fallback, got %#v", byName["secret_storage"])
 	}
-	if asBool(byName["secret_storage_fallback"]["ok"]) {
-		t.Fatalf("expected secret_storage_fallback to remain warning-only, got %#v", byName["secret_storage_fallback"])
+	// secret_storage_mode check is present for file stores (renamed from secret_storage_fallback)
+	if _, ok := byName["secret_storage_mode"]; !ok {
+		t.Fatalf("expected secret_storage_mode check to be present, got keys: %v", func() []string {
+			keys := make([]string, 0, len(byName))
+			for k := range byName {
+				keys = append(keys, k)
+			}
+			return keys
+		}())
 	}
-	if got := asString(byName["secret_storage_fallback"]["detail"]); !strings.Contains(got, axmeCLISecretStorageEnv+"=file") || !strings.Contains(got, "headless or CI") {
+	// For an explicit file store (autoFallback=false), mode check is ok=false (user explicitly set it)
+	if asBool(byName["secret_storage_mode"]["ok"]) {
+		t.Fatalf("expected secret_storage_mode to be warning (ok=false) for explicit file store, got %#v", byName["secret_storage_mode"])
+	}
+	if got := asString(byName["secret_storage_mode"]["detail"]); !strings.Contains(got, axmeCLISecretStorageEnv+"=file") {
 		t.Fatalf("expected file fallback warning detail, got %q", got)
 	}
 	if !asBool(byName["personal_context"]["ok"]) {

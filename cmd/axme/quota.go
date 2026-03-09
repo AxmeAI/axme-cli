@@ -66,7 +66,7 @@ func newQuotaShowCmd(rt *runtime) *cobra.Command {
 				return err
 			}
 			if status >= 400 {
-				return fmt.Errorf("server returned %d: %s", status, raw)
+				return fmt.Errorf("%s", httpErrorMessage(status, raw))
 			}
 			if rt.outputJSON {
 				fmt.Println(raw)
@@ -203,7 +203,7 @@ Valid upgrade tiers:
 				return err
 			}
 			if status >= 400 {
-				return fmt.Errorf("server returned %d: %s", status, raw)
+				return fmt.Errorf("%s", httpErrorMessage(status, raw))
 			}
 			if rt.outputJSON {
 				fmt.Println(raw)
