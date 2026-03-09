@@ -118,16 +118,22 @@ func run() int {
 	if warning := secretStorageFallbackWarning(rt.secretStore); warning != "" {
 		fmt.Fprintln(os.Stderr, warning)
 	}
+	// Start background version check before executing the command so the
+	// network request runs concurrently with the actual command.
+	updateCh := startBackgroundUpdateCheck()
 	root := buildRoot(rt)
 	if err := root.Execute(); err != nil {
 		var ce *cliError
 		if errors.As(err, &ce) {
 			fmt.Fprintln(os.Stderr, ce.Msg)
+			printUpdateHint(updateCh)
 			return ce.Code
 		}
 		fmt.Fprintln(os.Stderr, err)
+		printUpdateHint(updateCh)
 		return 1
 	}
+	printUpdateHint(updateCh)
 	return 0
 }
 
@@ -170,6 +176,7 @@ func buildRoot(rt *runtime) *cobra.Command {
 		newStatusCmd(rt),
 		newDoctorCmd(rt),
 		newVersionCmd(rt),
+		newUpdateCmd(rt),
 		newRawCmd(rt),
 		newQuotaCmd(rt),
 	)
