@@ -217,7 +217,7 @@ func TestBuildRootDoesNotExposeAdminCommand(t *testing.T) {
 func TestLoginCommandHidesLegacyFlags(t *testing.T) {
 	cmd := newLoginCmd(&runtime{})
 
-	for _, name := range []string{"device", "web", "bootstrap-alpha", "onboarding-url"} {
+	for _, name := range []string{"web", "bootstrap-alpha", "onboarding-url"} {
 		flag := cmd.Flags().Lookup(name)
 		if flag == nil {
 			t.Fatalf("expected %q flag to exist", name)
@@ -225,6 +225,15 @@ func TestLoginCommandHidesLegacyFlags(t *testing.T) {
 		if !flag.Hidden {
 			t.Fatalf("expected %q flag to be hidden", name)
 		}
+	}
+
+	// --browser is the new visible flag replacing legacy --device
+	browserFlag := cmd.Flags().Lookup("browser")
+	if browserFlag == nil {
+		t.Fatal("expected \"browser\" flag to exist")
+	}
+	if browserFlag.Hidden {
+		t.Fatal("expected \"browser\" flag to be visible (not hidden)")
 	}
 }
 
