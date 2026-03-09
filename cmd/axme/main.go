@@ -49,15 +49,16 @@ type appConfig struct {
 }
 
 type clientConfig struct {
-	BaseURL       string `json:"base_url"`
-	APIKey        string `json:"api_key,omitempty"`
-	ActorToken    string `json:"actor_token,omitempty"`
-	BearerToken   string `json:"bearer_token,omitempty"`
-	OwnerAgent    string `json:"owner_agent,omitempty"`
-	OrgID         string `json:"org_id,omitempty"`
-	WorkspaceID   string `json:"workspace_id,omitempty"`
-	Environment   string `json:"environment,omitempty"`
-	secretsLoaded bool   `json:"-"`
+	BaseURL      string `json:"base_url"`
+	APIKey       string `json:"api_key,omitempty"`
+	ActorToken   string `json:"actor_token,omitempty"`
+	BearerToken  string `json:"bearer_token,omitempty"`
+	OwnerAgent   string `json:"owner_agent,omitempty"`
+	OrgID        string `json:"org_id,omitempty"`
+	WorkspaceID  string `json:"workspace_id,omitempty"`
+	Environment  string `json:"environment,omitempty"`
+	RefreshToken string `json:"-"` // loaded from secret store, never persisted to config.json
+	secretsLoaded bool  `json:"-"`
 }
 
 type runtime struct {
@@ -970,15 +971,31 @@ func newWorkspaceCmd(rt *runtime) *cobra.Command {
 				if err := rt.persistConfig(); err != nil {
 					return err
 				}
-				return rt.printGeneric(map[string]any{
-					"ok":                    true,
-					"context":               rt.activeContextName(),
-					"org_id":                ctx.OrgID,
-					"workspace_id":          ctx.WorkspaceID,
-					"selected_workspace":    asMap(responseBody["selected_workspace"]),
-					"selected_organization": asMap(responseBody["selected_organization"]),
-					"server_context":        serverContext,
-				})
+				if rt.outputJSON {
+					return rt.printJSON(map[string]any{
+						"ok":                    true,
+						"context":               rt.activeContextName(),
+						"org_id":                ctx.OrgID,
+						"workspace_id":          ctx.WorkspaceID,
+						"selected_workspace":    asMap(responseBody["selected_workspace"]),
+						"selected_organization": asMap(responseBody["selected_organization"]),
+						"server_context":        serverContext,
+					})
+				}
+				ws := asMap(responseBody["selected_workspace"])
+				wsName := asString(ws["name"])
+				wsID := asString(ws["workspace_id"])
+				orgName := asString(ws["org_name"])
+				label := wsName
+				if label == "" {
+					label = wsID
+				}
+				fmt.Printf("Switched to workspace: %s", label)
+				if orgName != "" {
+					fmt.Printf(" (%s)", orgName)
+				}
+				fmt.Println()
+				return nil
 			},
 		},
 	)
@@ -2423,6 +2440,51 @@ func (rt *runtime) streamEvents(ctx context.Context, c *clientConfig, intentID s
 }
 
 func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path string, query map[string]string, payload any, expectJSON bool) (int, map[string]any, string, error) {
+	status, body, raw, err := rt.doRequest(ctx, c, method, path, query, payload, expectJSON)
+	if err != nil {
+		return status, body, raw, err
+	}
+	// Auto-refresh: if we get 401 with an expired actor token and have a refresh token, try once.
+	if status == 401 && c.RefreshToken != "" && c.resolvedActorToken() != "" {
+		code := asString(asMap(body["error"])["code"])
+		if code == "token_expired" || code == "invalid_actor_token" || strings.Contains(raw, "token_expired") || strings.Contains(raw, "expired") {
+			if newToken, refreshErr := rt.tryRefreshActorToken(ctx, c); refreshErr == nil && newToken != "" {
+				// Retry with the fresh token
+				return rt.doRequest(ctx, c, method, path, query, payload, expectJSON)
+			}
+		}
+	}
+	return status, body, raw, err
+}
+
+// tryRefreshActorToken exchanges the stored refresh_token for a new access_token.
+// On success it updates c.ActorToken and persists the new secrets.
+func (rt *runtime) tryRefreshActorToken(ctx context.Context, c *clientConfig) (string, error) {
+	// Use a minimal config without actor token to avoid sending the expired JWT
+	refreshCtx := &clientConfig{
+		BaseURL: c.BaseURL,
+		APIKey:  c.APIKey,
+	}
+	_, body, _, err := rt.doRequest(ctx, refreshCtx, "POST", "/v1/auth/refresh", nil, map[string]any{
+		"refresh_token": c.RefreshToken,
+	}, true)
+	if err != nil {
+		return "", err
+	}
+	newToken := asString(body["access_token"])
+	if newToken == "" {
+		return "", fmt.Errorf("refresh: no access_token in response")
+	}
+	c.setActorToken(newToken)
+	if newRefresh := asString(body["refresh_token"]); newRefresh != "" {
+		c.RefreshToken = newRefresh
+	}
+	// Best-effort persist; don't fail the original request if save fails.
+	_ = rt.persistConfig()
+	return newToken, nil
+}
+
+func (rt *runtime) doRequest(ctx context.Context, c *clientConfig, method, path string, query map[string]string, payload any, expectJSON bool) (int, map[string]any, string, error) {
 	base := strings.TrimRight(c.BaseURL, "/")
 	if base == "" {
 		return 0, nil, "", &cliError{Code: 2, Msg: "base_url is empty (set context or --base-url)"}
@@ -2681,17 +2743,11 @@ func logoutGuidanceMessage(apiKeyCleared bool, serverResult map[string]any) stri
 	attempted := asBool(serverResult["attempted"])
 	revoked := asBool(serverResult["revoked"])
 	mode := asString(serverResult["mode"])
-	if errText := strings.TrimSpace(asString(serverResult["error"])); errText != "" {
+	if strings.TrimSpace(asString(serverResult["error"])) != "" {
 		if apiKeyCleared {
-			return fmt.Sprintf(
-				"Cleared local account and workspace credentials, but server-side session revocation did not complete. If another environment is still signed in, use `axme session list` or `axme logout --all-sessions` there. Server detail: %s",
-				errText,
-			)
+			return "Cleared local account and workspace credentials, but server-side session revocation did not complete. If another environment is still signed in, use `axme session list` or `axme logout --all-sessions` there."
 		}
-		return fmt.Sprintf(
-			"Cleared the local account session token, but server-side session revocation did not complete. Your workspace API key remains available for workspace-scoped commands. If another environment is still signed in, use `axme session list` or `axme logout --all-sessions` there. Server detail: %s",
-			errText,
-		)
+		return "Cleared the local account session token, but server-side session revocation did not complete. Your workspace API key remains available for workspace-scoped commands. If another environment is still signed in, use `axme session list` or `axme logout --all-sessions` there."
 	}
 	if attempted && revoked && mode == "all_sessions" {
 		if apiKeyCleared {
@@ -3209,6 +3265,9 @@ func (rt *runtime) loadSecretsIntoContext(name string, c *clientConfig) error {
 	if strings.TrimSpace(c.resolvedActorToken()) == "" {
 		c.setActorToken(strings.TrimSpace(secrets.ActorToken))
 	}
+	if strings.TrimSpace(c.RefreshToken) == "" {
+		c.RefreshToken = strings.TrimSpace(secrets.RefreshToken)
+	}
 	c.secretsLoaded = true
 	return nil
 }
@@ -3231,8 +3290,9 @@ func (rt *runtime) persistConfig() error {
 				continue
 			}
 			secrets := storedContextSecrets{
-				APIKey:     c.APIKey,
-				ActorToken: c.resolvedActorToken(),
+				APIKey:       c.APIKey,
+				ActorToken:   c.resolvedActorToken(),
+				RefreshToken: c.RefreshToken,
 			}
 			if !c.secretsLoaded {
 				existing, err := rt.secretStore.Load(name)
@@ -3244,6 +3304,9 @@ func (rt *runtime) persistConfig() error {
 				}
 				if strings.TrimSpace(secrets.ActorToken) == "" {
 					secrets.ActorToken = existing.ActorToken
+				}
+				if strings.TrimSpace(secrets.RefreshToken) == "" {
+					secrets.RefreshToken = existing.RefreshToken
 				}
 			}
 			if err := rt.secretStore.Save(name, secrets); err != nil {

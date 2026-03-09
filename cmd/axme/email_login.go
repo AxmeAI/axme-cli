@@ -103,6 +103,9 @@ func (rt *runtime) runEmailLogin(ctx context.Context, ctxName string) error {
 	if accountSessionToken := asString(verifyBody["account_session_token"]); accountSessionToken != "" {
 		c.setActorToken(accountSessionToken)
 	}
+	if refreshToken := asString(verifyBody["refresh_token"]); refreshToken != "" {
+		c.RefreshToken = refreshToken
+	}
 	if orgID := asString(verifyBody["org_id"]); orgID != "" {
 		c.OrgID = orgID
 	}
