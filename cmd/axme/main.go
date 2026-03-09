@@ -2458,10 +2458,15 @@ func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path st
 	if err != nil {
 		return status, body, raw, err
 	}
-	// Auto-refresh: if we get 401 with an expired actor token and have a refresh token, try once.
+	// Auto-refresh: if we get 401 with an expired/invalid actor token and have a refresh token, try once.
 	if status == 401 && c.RefreshToken != "" && c.resolvedActorToken() != "" {
 		code := asString(asMap(body["error"])["code"])
-		if code == "token_expired" || code == "invalid_actor_token" || strings.Contains(raw, "token_expired") || strings.Contains(raw, "expired") {
+		detail := asString(body["detail"])
+		isTokenError := code == "token_expired" || code == "invalid_actor_token" ||
+			strings.Contains(raw, "token_expired") || strings.Contains(raw, "expired") ||
+			strings.Contains(detail, "invalid access token") || strings.Contains(detail, "invalid actor token") ||
+			(strings.Contains(detail, "token") && strings.Contains(detail, "invalid"))
+		if isTokenError {
 			if newToken, refreshErr := rt.tryRefreshActorToken(ctx, c); refreshErr == nil && newToken != "" {
 				// Retry with the fresh token
 				return rt.doRequest(ctx, c, method, path, query, payload, expectJSON)
@@ -2493,8 +2498,21 @@ func (rt *runtime) tryRefreshActorToken(ctx context.Context, c *clientConfig) (s
 	if newRefresh := asString(body["refresh_token"]); newRefresh != "" {
 		c.RefreshToken = newRefresh
 	}
-	// Best-effort persist; don't fail the original request if save fails.
-	_ = rt.persistConfig()
+	// Persist directly via secretStore to avoid the rt.cfg.Contexts indirection
+	// (c is a value-copy of the context, not the stored pointer).
+	if rt.secretStore != nil {
+		contextName := rt.activeContextName()
+		_ = rt.secretStore.Save(contextName, storedContextSecrets{
+			APIKey:       c.APIKey,
+			ActorToken:   c.resolvedActorToken(),
+			RefreshToken: c.RefreshToken,
+		})
+		// Also propagate into cfg so persistConfig stays consistent.
+		if stored := rt.cfg.Contexts[contextName]; stored != nil {
+			stored.setActorToken(newToken)
+			stored.RefreshToken = c.RefreshToken
+		}
+	}
 	return newToken, nil
 }
 
@@ -2545,6 +2563,10 @@ func (rt *runtime) doRequest(ctx context.Context, c *clientConfig, method, path 
 	rawStr := string(rawBody)
 	out := map[string]any{}
 	if expectJSON && len(rawBody) > 0 {
+		_ = json.Unmarshal(rawBody, &out)
+	} else if !expectJSON && len(rawBody) > 0 && len(rawBody) < 4096 {
+		// Always try to parse error responses as JSON regardless of expectJSON,
+		// so that auto-refresh and error handling can inspect error codes.
 		_ = json.Unmarshal(rawBody, &out)
 	}
 	return resp.StatusCode, out, rawStr, nil
