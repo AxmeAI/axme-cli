@@ -2182,9 +2182,9 @@ func (rt *runtime) doctorChecks(ctx context.Context, c *clientConfig) []map[stri
 		if fs, ok := rt.secretStore.(*fileSecretStore); ok && fs.autoFallback {
 			isAutoFallback = true
 		}
-		modeDetail := "file (auto-fallback; keyring unavailable)"
+		modeDetail := "file 0600 (headless/server — normal)"
 		if !isAutoFallback {
-			modeDetail = "file (explicit)"
+			modeDetail = "file (explicit via AXME_CLI_SECRET_STORAGE=file)"
 		}
 		checks = append(checks, map[string]any{
 			"check":  "secret_storage_mode",
@@ -2295,11 +2295,12 @@ func secretStorageFallbackWarning(store secretStore) string {
 		return ""
 	}
 	if fs, ok := store.(*fileSecretStore); ok && fs.autoFallback {
-		// Quiet fallback: keyring unavailable, silently using file. Print only once.
+		// On Linux servers gnome-keyring is present but the login keyring collection
+		// is locked (requires a GUI Pinentry to unlock). In headless/SSH environments
+		// this is expected — file storage with 0600 permissions is equivalent in practice.
 		return fmt.Sprintf(
-			"Note: OS keyring unavailable; credentials are stored in %s. Set %s=keyring if running a desktop environment.",
+			"Note: Credentials stored in %s (mode 0600). This is normal for servers and SSH sessions.",
 			store.Detail(),
-			axmeCLISecretStorageEnv,
 		)
 	}
 	return fmt.Sprintf(
