@@ -66,7 +66,8 @@ func (s *keyringSecretStore) Save(contextName string, secrets storedContextSecre
 }
 
 type fileSecretStore struct {
-	path string
+	path         string
+	autoFallback bool
 }
 
 func (s *fileSecretStore) Mode() string {
@@ -128,11 +129,19 @@ func (s *fileSecretStore) readAll() (map[string]storedContextSecrets, error) {
 
 func initSecretStore(cfgFile string) (secretStore, error) {
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv(axmeCLISecretStorageEnv)))
+	filePath := filepath.Join(filepath.Dir(cfgFile), "secrets.json")
 	switch mode {
-	case "", "keyring":
-		return &keyringSecretStore{}, nil
 	case "file":
-		return &fileSecretStore{path: filepath.Join(filepath.Dir(cfgFile), "secrets.json")}, nil
+		return &fileSecretStore{path: filePath}, nil
+	case "keyring":
+		return &keyringSecretStore{}, nil
+	case "":
+		// Auto-detect: probe keyring availability, fall back to file silently.
+		probe := &keyringSecretStore{}
+		if _, err := probe.Load("__probe__"); err == nil {
+			return probe, nil
+		}
+		return &fileSecretStore{path: filePath, autoFallback: true}, nil
 	default:
 		return nil, fmt.Errorf(
 			"unsupported secret storage mode %q in %s (supported: keyring, file)",
