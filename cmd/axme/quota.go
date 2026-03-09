@@ -73,14 +73,14 @@ func newQuotaShowCmd(rt *runtime) *cobra.Command {
 				return nil
 			}
 
-			quotaPolicy := asMap(body["quota_policy"])
-			usageSummary := asMap(body["usage_summary"])
+			quotaPolicy := asMap(asMap(body["overview"])["quota_policy"])
+			usageSummary := asMap(asMap(body["overview"])["usage_summary"])
 			dims := asMap(quotaPolicy["dimensions"])
 			usageDims := asMap(usageSummary["dimensions"])
 
 			if len(dims) == 0 {
 				fmt.Println("No quota policy found for this workspace.")
-				fmt.Println("Verify your email to activate limits: the email was sent at onboarding.")
+				fmt.Println("Contact support or run `axme quota upgrade-request` to request limits.")
 				return nil
 			}
 
