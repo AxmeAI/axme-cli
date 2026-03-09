@@ -56,18 +56,26 @@ State and events can be accessed through:
 
 ---
 
-## Install
+## Install and Update
 
-Recommended install path (Linux/macOS, no Go required):
+Install or update to the latest release (Linux/macOS, no Go required):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AxmeAI/axme-cli/main/install.sh | sh
 ```
 
+The same command installs if you don't have the CLI, and upgrades to the latest release if you do. After install the CLI periodically checks for new versions in the background and prompts you to update.
+
 Install a specific released version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AxmeAI/axme-cli/main/install.sh | AXME_VERSION=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/AxmeAI/axme-cli/main/install.sh | AXME_VERSION=v0.2.2 sh
+```
+
+Update explicitly from within the CLI:
+
+```bash
+axme update
 ```
 
 Manual downloads:
@@ -95,15 +103,19 @@ go build -o ./bin/axme ./cmd/axme
 
 ## Quick Setup
 
-Preferred cloud alpha path:
+Preferred cloud path — email-based passwordless login:
 
 ```bash
 axme login
+# Enter your email → receive OTP → enter code
+# CLI automatically selects or prompts for workspace
 axme whoami
 axme quota show
 ```
 
-`axme login` should guide a new user through the cloud alpha onboarding path, create or attach the first workspace, and save the resulting `api_key`, `org_id`, and `workspace_id` into the active context.
+`axme login` sends a one-time code to your email. Enter it in the CLI — no browser required, no API key to copy. On success the CLI stores credentials securely (OS keyring on desktop; `~/.config/axme/secrets.json` mode 0600 on servers and SSH sessions) and selects your workspace.
+
+The `access_token` (JWT) has a 15-minute TTL. The CLI automatically refreshes it using the stored `refresh_token` (30-day TTL) before each command — you only need to re-login after 30 days of inactivity.
 
 Direct/manual context setup remains available:
 
@@ -148,11 +160,10 @@ Alpha quota tiers:
 
 | Tier | intents/day | actors | service accounts |
 |---|---|---|---|
-| unverified | 50 | 5 | 2 |
 | email_verified | 500 | 20 | 10 |
 | corporate | 5 000 | 200 | 50 |
 
-Email verification upgrades you automatically from `unverified` → `email_verified`.  
+`email_verified` tier is applied automatically on first login via email OTP.  
 For `corporate`, run `axme quota upgrade-request` to submit a review request.
 
 ---
@@ -161,11 +172,14 @@ For `corporate`, run `axme quota upgrade-request` to submit a review request.
 
 ### Authentication and Login
 ```bash
-axme login                           # primary cloud alpha onboarding/login path
+axme login                           # email OTP login (primary path — no browser, no key copy)
+axme login --browser                 # browser-assisted flow (legacy, requires existing key/context)
 axme login --api-key <key>           # non-interactive: store API key directly
-axme login --device                  # browser-assisted login flow when you already have a usable key/context
 axme login --actor-token <jwt>       # store an actor JWT for actor-scoped routes
 axme whoami                          # show current identity, context, and active sessions
+axme session list                    # list active sessions
+axme session revoke <session_id>     # revoke a specific session
+axme session revoke --current        # revoke the current session (equivalent to logout on this device)
 axme logout                          # clear credentials for the active context
 ```
 
@@ -194,6 +208,29 @@ axme agents register --name "<name>" --capability "<capability>" --endpoint-url 
 axme agents resolve "@name"
 ```
 
+### Organizations and Workspaces
+```bash
+axme org list                        # list organizations in your account
+axme workspace list                  # list workspaces visible to your account
+axme workspace use <workspace_id>    # switch active workspace (persisted to context)
+```
+
+### Workspace Member Management
+```bash
+# Org-level members (invitation, role change, removal from org)
+axme member list                                     # list org members
+axme member add <actor_id> --role <role>             # add actor to org + workspace
+axme member remove <member_id>                       # remove member from org entirely
+axme member update-role <member_id> --role <role>    # change member role
+
+# Workspace-scoped access (include/exclude without touching org membership)
+axme workspace members list                          # list members in current workspace
+axme workspace members include <actor_id> --role <role>   # grant workspace access to an org member
+axme workspace members exclude <member_id>           # revoke workspace access (member stays in org)
+```
+
+`axme workspace members include/exclude` operates within the workspace only — it does not add or remove the user from the organization. Use `axme member add/remove` for org-level changes.
+
 ### Operations
 ```bash
 axme logs <intent_id>              # fetch audit log for an intent
@@ -202,6 +239,7 @@ axme raw <method> <path> [body]    # raw API call (for debugging)
 axme status                        # gateway and service health
 axme doctor                        # config, connectivity, and auth check
 axme version                       # CLI version and build info
+axme update                        # update CLI to the latest release
 ```
 
 Add `--json` to any command for machine-readable output.
