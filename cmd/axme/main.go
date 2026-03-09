@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2608,6 +2609,15 @@ func (rt *runtime) streamEvents(ctx context.Context, c *clientConfig, intentID s
 }
 
 func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path string, query map[string]string, payload any, expectJSON bool) (int, map[string]any, string, error) {
+	// Proactive pre-expiry refresh: if the actor token expires within 60 seconds
+	// and we have a refresh token, silently refresh before sending the request.
+	// This avoids the reactive 401 round-trip in the common case and prevents
+	// failures when the token expires mid-flight.
+	if c.RefreshToken != "" && c.resolvedActorToken() != "" {
+		if secs := jwtSecondsUntilExpiry(c.resolvedActorToken()); secs >= 0 && secs < 60 {
+			_, _ = rt.tryRefreshActorToken(ctx, c)
+		}
+	}
 	status, body, raw, err := rt.doRequest(ctx, c, method, path, query, payload, expectJSON)
 	if err != nil {
 		return status, body, raw, err
@@ -2628,6 +2638,38 @@ func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path st
 		}
 	}
 	return status, body, raw, err
+}
+
+// jwtSecondsUntilExpiry returns the number of seconds until the JWT expires,
+// or -1 if the token is empty, malformed, or already expired.
+func jwtSecondsUntilExpiry(token string) int64 {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return -1
+	}
+	padded := parts[1]
+	switch len(padded) % 4 {
+	case 2:
+		padded += "=="
+	case 3:
+		padded += "="
+	}
+	raw, err := base64.URLEncoding.DecodeString(padded)
+	if err != nil {
+		// Try RawURLEncoding (no padding)
+		raw, err = base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			return -1
+		}
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(raw, &claims); err != nil || claims.Exp == 0 {
+		return -1
+	}
+	remaining := claims.Exp - time.Now().Unix()
+	return remaining
 }
 
 // tryRefreshActorToken exchanges the stored refresh_token for a new access_token.
