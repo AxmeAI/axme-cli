@@ -179,136 +179,110 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 	var owner string
 	var targetContext string
 	var useWebOnboarding bool
-	var useDeviceFlow bool
+	var useBrowserFlow bool
 	var useAlphaBootstrap bool
 	var noBrowser bool
 	var onboardingURL string
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Sign in to your AXME account",
+		Long: `Sign in to AXME using your email address.
+
+A one-time code will be sent to your email. Enter it at the prompt to complete
+sign-in. Your credentials are stored securely for future CLI commands.
+
+Use --browser to use the legacy browser-based approval flow instead.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if onboardingURL == "" {
 				onboardingURL = defaultAlphaOnboardingURL
 			}
-			shouldUseAccountLogin := useDeviceFlow
-			if !shouldUseAccountLogin && key == "" && token == "" && interactiveInputAvailable() && !useWebOnboarding && !useAlphaBootstrap {
-				shouldUseAccountLogin = true
-			}
-			// Account-first device/browser flow: no API key required upfront
-			if shouldUseAccountLogin {
-				ctxName := targetContext
-				if ctxName == "" {
-					ctxName = rt.activeContextName()
-				}
-				accountCtx := rt.ensureContext(ctxName)
-				prepareCloudAlphaContext(accountCtx)
-				if key != "" {
-					accountCtx.APIKey = strings.TrimSpace(key)
-				}
-				if token != "" {
-					accountCtx.setActorToken(strings.TrimSpace(token))
-				}
-				if owner != "" {
-					accountCtx.OwnerAgent = strings.TrimSpace(owner)
-				}
-				rt.applyPersistentContextOverrides(accountCtx)
-				return rt.runDeviceLogin(cmd.Context(), ctxName, !noBrowser)
-			}
-			if key == "" && token == "" {
-				if interactiveInputAvailable() {
-					if useWebOnboarding {
-						if !noBrowser {
-							if err := openURLInBrowser(onboardingURL); err != nil && !rt.outputJSON {
-								fmt.Fprintf(os.Stderr, "warning: could not open browser automatically: %v\n", err)
-							}
-						}
-						enteredKey, err := promptLine("Paste AXME API key (or press Enter to cancel): ")
-						if err != nil {
-							return err
-						}
-						key = enteredKey
-					} else if useAlphaBootstrap {
-						ctxName := targetContext
-						if ctxName == "" {
-							ctxName = rt.activeContextName()
-						}
-						return rt.runAlphaBootstrapLogin(cmd.Context(), ctxName)
-					} else {
-						enteredKey, err := promptLine("AXME API key (or press Enter to cancel): ")
-						if err != nil {
-							return err
-						}
-						key = enteredKey
-					}
-				}
-			}
-			if key == "" && token == "" {
-				msg := fmt.Sprintf(
-					"No credentials were stored. Run `axme login` interactively to sign in to your account, use --api-key/--actor-token for manual recovery, or open %s for legacy alpha onboarding instructions.",
-					onboardingURL,
-				)
-				if rt.outputJSON {
-					return rt.printJSON(map[string]any{
-						"ok":             true,
-						"deferred":       true,
-						"onboarding_url": onboardingURL,
-						"recommended":    "axme login",
-						"message":        msg,
-					})
-				}
-				fmt.Println(msg)
-				return nil
-			}
+
 			ctxName := targetContext
 			if ctxName == "" {
 				ctxName = rt.activeContextName()
 			}
-			ctx := rt.ensureContext(ctxName)
+			accountCtx := rt.ensureContext(ctxName)
+			prepareCloudAlphaContext(accountCtx)
 			if key != "" {
-				ctx.APIKey = strings.TrimSpace(key)
+				accountCtx.APIKey = strings.TrimSpace(key)
 			}
 			if token != "" {
-				ctx.setActorToken(strings.TrimSpace(token))
+				accountCtx.setActorToken(strings.TrimSpace(token))
 			}
 			if owner != "" {
-				ctx.OwnerAgent = strings.TrimSpace(owner)
+				accountCtx.OwnerAgent = strings.TrimSpace(owner)
 			}
-			rt.applyPersistentContextOverrides(ctx)
-			var hydrated bool
-			var hydrateWarning string
-			if resolvedContext, err := rt.hydrateContextFromServer(cmd.Context(), ctx); err == nil {
-				hydrated = true
-				if resolvedOrgID := asString(resolvedContext["org_id"]); resolvedOrgID != "" {
-					ctx.OrgID = resolvedOrgID
+			rt.applyPersistentContextOverrides(accountCtx)
+
+			// Legacy browser/device flow
+			if useBrowserFlow {
+				return rt.runDeviceLogin(cmd.Context(), ctxName, !noBrowser)
+			}
+
+			// Alpha bootstrap flow
+			if useAlphaBootstrap {
+				return rt.runAlphaBootstrapLogin(cmd.Context(), ctxName)
+			}
+
+			// Manual key/token provided — just store them
+			if key != "" || token != "" {
+				if err := rt.persistConfig(); err != nil {
+					return err
 				}
-				if resolvedWorkspaceID := asString(resolvedContext["workspace_id"]); resolvedWorkspaceID != "" {
-					ctx.WorkspaceID = resolvedWorkspaceID
+				if rt.outputJSON {
+					return rt.printJSON(map[string]any{"ok": true, "context": ctxName, "method": "manual"})
 				}
-			} else {
-				hydrateWarning = err.Error()
-				if !rt.outputJSON {
-					fmt.Fprintf(
-						os.Stderr,
-						"warning: saved credentials, but could not resolve default org/workspace automatically: %v\n",
-						err,
-					)
+				fmt.Fprintf(os.Stderr, "Credentials stored in context %q.\n", ctxName)
+				return nil
+			}
+
+			// Web onboarding (legacy)
+			if useWebOnboarding {
+				if !noBrowser {
+					if err := openURLInBrowser(onboardingURL); err != nil && !rt.outputJSON {
+						fmt.Fprintf(os.Stderr, "warning: could not open browser automatically: %v\n", err)
+					}
 				}
+				enteredKey, err := promptLine("Paste AXME API key (or press Enter to cancel): ")
+				if err != nil {
+					return err
+				}
+				if strings.TrimSpace(enteredKey) == "" {
+					if rt.outputJSON {
+						return rt.printJSON(map[string]any{"ok": false, "error": "no key provided"})
+					}
+					fmt.Fprintln(os.Stderr, "No key provided. Run `axme login` to use email sign-in.")
+					return nil
+				}
+				accountCtx.APIKey = strings.TrimSpace(enteredKey)
+				if err := rt.persistConfig(); err != nil {
+					return err
+				}
+				if rt.outputJSON {
+					return rt.printJSON(map[string]any{"ok": true, "context": ctxName})
+				}
+				fmt.Fprintf(os.Stderr, "API key stored in context %q.\n", ctxName)
+				return nil
 			}
-			if err := rt.persistConfig(); err != nil {
-				return err
+
+			// Default: email-first OTP flow
+			if interactiveInputAvailable() {
+				return rt.runEmailLogin(cmd.Context(), ctxName)
 			}
-			body := map[string]any{
-				"ok":                  true,
-				"context":             ctxName,
-				"hydrated":            hydrated,
-				"org_id":              ctx.OrgID,
-				"workspace_id":        ctx.WorkspaceID,
-				"has_account_session": ctx.resolvedActorToken() != "",
+
+			// Non-interactive with no credentials
+			msg := fmt.Sprintf(
+				"No credentials were stored. Run `axme login` interactively to sign in, or pass --api-key/--actor-token for manual setup.",
+			)
+			if rt.outputJSON {
+				return rt.printJSON(map[string]any{
+					"ok":          false,
+					"error":       "no_credentials",
+					"message":     msg,
+					"recommended": "axme login",
+				})
 			}
-			if hydrateWarning != "" {
-				body["warning"] = hydrateWarning
-			}
-			return rt.printResult(200, body)
+			return fmt.Errorf("%s", msg)
 		},
 	}
 	cmd.Flags().StringVar(&key, "api-key", "", "API key")
@@ -317,11 +291,10 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 	cmd.Flags().StringVar(&owner, "owner-agent", "", "Owner agent (e.g. agent://alice)")
 	cmd.Flags().StringVar(&targetContext, "context", "", "Target context name")
 	cmd.Flags().BoolVar(&useWebOnboarding, "web", false, "legacy fallback")
-	cmd.Flags().BoolVar(&useDeviceFlow, "device", false, "legacy alias for the default account sign-in flow")
+	cmd.Flags().BoolVar(&useBrowserFlow, "browser", false, "use browser-based approval flow instead of email sign-in")
 	cmd.Flags().BoolVar(&useAlphaBootstrap, "bootstrap-alpha", false, "legacy alpha bootstrap flow")
-	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't try to open browser automatically during login")
+	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't try to open browser automatically (only relevant with --browser)")
 	cmd.Flags().StringVar(&onboardingURL, "onboarding-url", defaultAlphaOnboardingURL, "CLI onboarding page URL")
-	_ = cmd.Flags().MarkHidden("device")
 	_ = cmd.Flags().MarkHidden("web")
 	_ = cmd.Flags().MarkHidden("bootstrap-alpha")
 	_ = cmd.Flags().MarkHidden("onboarding-url")
