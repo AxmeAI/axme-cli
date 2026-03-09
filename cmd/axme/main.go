@@ -861,166 +861,312 @@ func newWorkspaceCmd(rt *runtime) *cobra.Command {
 	cmd := &cobra.Command{Use: "workspace", Short: "List or select workspaces from personal context"}
 
 	cmd.AddCommand(
-		&cobra.Command{
-			Use:   "list",
-			Short: "List workspaces from personal context",
-			RunE: func(cmd *cobra.Command, args []string) error {
-				ctx, err := rt.effectiveContextWithSecrets()
-				if err != nil {
-					return err
-				}
-				body, err := rt.personalContextFromServer(cmd.Context(), ctx)
-				if err != nil {
-					return err
-				}
-				workspaces := asSlice(body["workspaces"])
-				summary := personalContextSummary(body)
-				if rt.outputJSON {
-					out := map[string]any{
-						"workspaces":         workspaces,
-						"selected_workspace": asMap(body["selected_workspace"]),
-						"selected_org":       asMap(body["selected_organization"]),
-						"server_context":     asMap(body["context"]),
-					}
-					for k, v := range summary {
-						out[k] = v
-					}
-					return rt.printJSON(out)
-				}
-				selectedWorkspaceID := asString(asMap(body["selected_workspace"])["workspace_id"])
-				rows := make([]map[string]any, 0, len(workspaces))
-				for _, item := range workspaces {
-					workspace := asMap(item)
-					rows = append(rows, map[string]any{
-						"selected":     asString(workspace["workspace_id"]) == selectedWorkspaceID,
-						"workspace_id": asString(workspace["workspace_id"]),
-						"name":         asString(workspace["name"]),
-						"org_id":       asString(workspace["org_id"]),
-						"org_name":     asString(workspace["org_name"]),
-						"env":          asString(workspace["environment"]),
-						"status":       asString(workspace["status"]),
-						"roles":        strings.Join(asStringSlice(workspace["roles"]), ","),
-					})
-				}
-				printTable(
-					[]string{"SELECTED", "WORKSPACE_ID", "NAME", "ORG_ID", "ORG_NAME", "ENV", "STATUS", "ROLES"},
-					rows,
-					[]string{"selected", "workspace_id", "name", "org_id", "org_name", "env", "status", "roles"},
-				)
-				if message := personalContextGuidanceMessage(body); message != "" {
-					fmt.Println()
-					fmt.Println(message)
-				}
-				return nil
-			},
-		},
+		newWorkspaceListCmd(rt),
+		newWorkspaceUseCmd(rt),
+		newWorkspaceMembersCmd(rt),
 	)
 
-	cmd.AddCommand(
-		&cobra.Command{
-			Use:   "use <workspace>",
-			Short: "Select active workspace from personal context",
-			Args:  cobra.ExactArgs(1),
-			RunE: func(cmd *cobra.Command, args []string) error {
-				target := strings.TrimSpace(args[0])
-				if target == "" {
-					return &cliError{Code: 2, Msg: "workspace identifier is required"}
+	return cmd
+}
+
+func newWorkspaceListCmd(rt *runtime) *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List workspaces from personal context",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
+			body, err := rt.personalContextFromServer(cmd.Context(), ctx)
+			if err != nil {
+				return err
+			}
+			workspaces := asSlice(body["workspaces"])
+			summary := personalContextSummary(body)
+			if rt.outputJSON {
+				out := map[string]any{
+					"workspaces":         workspaces,
+					"selected_workspace": asMap(body["selected_workspace"]),
+					"selected_org":       asMap(body["selected_organization"]),
+					"server_context":     asMap(body["context"]),
 				}
-				activeContextName := rt.activeContextName()
-				ctx, err := rt.contextWithSecrets(activeContextName)
-				if err != nil {
-					return err
+				for k, v := range summary {
+					out[k] = v
 				}
-				requestContext, err := rt.effectiveContextWithSecrets()
-				if err != nil {
-					return err
-				}
-				body, err := rt.personalContextFromServer(cmd.Context(), requestContext)
-				if err != nil {
-					return err
-				}
-				workspaces := asSlice(body["workspaces"])
-				var exactID map[string]any
-				nameMatches := make([]map[string]any, 0)
-				for _, item := range workspaces {
-					workspace := asMap(item)
-					if asString(workspace["workspace_id"]) == target {
-						exactID = workspace
-						break
-					}
-					if strings.EqualFold(asString(workspace["name"]), target) {
-						nameMatches = append(nameMatches, workspace)
-					}
-				}
-				selectedWorkspace := exactID
-				if len(selectedWorkspace) == 0 {
-					if len(nameMatches) == 1 {
-						selectedWorkspace = nameMatches[0]
-					} else if len(nameMatches) > 1 {
-						return &cliError{Code: 2, Msg: "workspace name is ambiguous; use workspace_id"}
-					}
-				}
-				if len(selectedWorkspace) == 0 {
-					return &cliError{Code: 2, Msg: "workspace not found in personal context"}
-				}
-				payload := map[string]any{
-					"org_id":       asString(selectedWorkspace["org_id"]),
-					"workspace_id": asString(selectedWorkspace["workspace_id"]),
-				}
-				status, responseBody, raw, err := rt.request(
-					cmd.Context(),
-					requestContext,
-					"POST",
-					"/v1/portal/personal/workspace-selection",
-					nil,
-					payload,
-					true,
-				)
-				if err != nil {
-					return err
-				}
-				if status >= 400 {
-					return rt.personalWorkspaceSelectionAPIError(status, responseBody, raw)
-				}
-				serverContext := asMap(responseBody["context"])
-				if orgID := asString(serverContext["org_id"]); orgID != "" {
-					ctx.OrgID = orgID
-				}
-				if workspaceID := asString(serverContext["workspace_id"]); workspaceID != "" {
-					ctx.WorkspaceID = workspaceID
-				}
-				if err := rt.persistConfig(); err != nil {
-					return err
-				}
-				if rt.outputJSON {
-					return rt.printJSON(map[string]any{
-						"ok":                    true,
-						"context":               rt.activeContextName(),
-						"org_id":                ctx.OrgID,
-						"workspace_id":          ctx.WorkspaceID,
-						"selected_workspace":    asMap(responseBody["selected_workspace"]),
-						"selected_organization": asMap(responseBody["selected_organization"]),
-						"server_context":        serverContext,
-					})
-				}
-				ws := asMap(responseBody["selected_workspace"])
-				wsName := asString(ws["name"])
-				wsID := asString(ws["workspace_id"])
-				orgName := asString(ws["org_name"])
-				label := wsName
-				if label == "" {
-					label = wsID
-				}
-				fmt.Printf("Switched to workspace: %s", label)
-				if orgName != "" {
-					fmt.Printf(" (%s)", orgName)
-				}
+				return rt.printJSON(out)
+			}
+			selectedWorkspaceID := asString(asMap(body["selected_workspace"])["workspace_id"])
+			rows := make([]map[string]any, 0, len(workspaces))
+			for _, item := range workspaces {
+				workspace := asMap(item)
+				rows = append(rows, map[string]any{
+					"selected":     asString(workspace["workspace_id"]) == selectedWorkspaceID,
+					"workspace_id": asString(workspace["workspace_id"]),
+					"name":         asString(workspace["name"]),
+					"org_id":       asString(workspace["org_id"]),
+					"org_name":     asString(workspace["org_name"]),
+					"env":          asString(workspace["environment"]),
+					"status":       asString(workspace["status"]),
+					"roles":        strings.Join(asStringSlice(workspace["roles"]), ","),
+				})
+			}
+			printTable(
+				[]string{"SELECTED", "WORKSPACE_ID", "NAME", "ORG_ID", "ORG_NAME", "ENV", "STATUS", "ROLES"},
+				rows,
+				[]string{"selected", "workspace_id", "name", "org_id", "org_name", "env", "status", "roles"},
+			)
+			if message := personalContextGuidanceMessage(body); message != "" {
 				fmt.Println()
-				return nil
-			},
+				fmt.Println(message)
+			}
+			return nil
 		},
-	)
+	}
+}
 
+func newWorkspaceUseCmd(rt *runtime) *cobra.Command {
+	return &cobra.Command{
+		Use:   "use <workspace>",
+		Short: "Select active workspace from personal context",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target := strings.TrimSpace(args[0])
+			if target == "" {
+				return &cliError{Code: 2, Msg: "workspace identifier is required"}
+			}
+			activeContextName := rt.activeContextName()
+			ctx, err := rt.contextWithSecrets(activeContextName)
+			if err != nil {
+				return err
+			}
+			requestContext, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
+			body, err := rt.personalContextFromServer(cmd.Context(), requestContext)
+			if err != nil {
+				return err
+			}
+			workspaces := asSlice(body["workspaces"])
+			var exactID map[string]any
+			nameMatches := make([]map[string]any, 0)
+			for _, item := range workspaces {
+				workspace := asMap(item)
+				if asString(workspace["workspace_id"]) == target {
+					exactID = workspace
+					break
+				}
+				if strings.EqualFold(asString(workspace["name"]), target) {
+					nameMatches = append(nameMatches, workspace)
+				}
+			}
+			selectedWorkspace := exactID
+			if len(selectedWorkspace) == 0 {
+				if len(nameMatches) == 1 {
+					selectedWorkspace = nameMatches[0]
+				} else if len(nameMatches) > 1 {
+					return &cliError{Code: 2, Msg: "workspace name is ambiguous; use workspace_id"}
+				}
+			}
+			if len(selectedWorkspace) == 0 {
+				return &cliError{Code: 2, Msg: "workspace not found in personal context"}
+			}
+			payload := map[string]any{
+				"org_id":       asString(selectedWorkspace["org_id"]),
+				"workspace_id": asString(selectedWorkspace["workspace_id"]),
+			}
+			status, responseBody, raw, err := rt.request(
+				cmd.Context(),
+				requestContext,
+				"POST",
+				"/v1/portal/personal/workspace-selection",
+				nil,
+				payload,
+				true,
+			)
+			if err != nil {
+				return err
+			}
+			if status >= 400 {
+				return rt.personalWorkspaceSelectionAPIError(status, responseBody, raw)
+			}
+			serverContext := asMap(responseBody["context"])
+			if orgID := asString(serverContext["org_id"]); orgID != "" {
+				ctx.OrgID = orgID
+			}
+			if workspaceID := asString(serverContext["workspace_id"]); workspaceID != "" {
+				ctx.WorkspaceID = workspaceID
+			}
+			if err := rt.persistConfig(); err != nil {
+				return err
+			}
+			if rt.outputJSON {
+				return rt.printJSON(map[string]any{
+					"ok":                    true,
+					"context":               rt.activeContextName(),
+					"org_id":                ctx.OrgID,
+					"workspace_id":          ctx.WorkspaceID,
+					"selected_workspace":    asMap(responseBody["selected_workspace"]),
+					"selected_organization": asMap(responseBody["selected_organization"]),
+					"server_context":        serverContext,
+				})
+			}
+			ws := asMap(responseBody["selected_workspace"])
+			wsName := asString(ws["name"])
+			wsID := asString(ws["workspace_id"])
+			orgName := asString(ws["org_name"])
+			label := wsName
+			if label == "" {
+				label = wsID
+			}
+			fmt.Printf("Switched to workspace: %s", label)
+			if orgName != "" {
+				fmt.Printf(" (%s)", orgName)
+			}
+			fmt.Println()
+			return nil
+		},
+	}
+}
+
+// newWorkspaceMembersCmd exposes `axme workspace members list/include/exclude`
+// which mirrors `axme member list/add/remove` but scoped to a specific workspace.
+// "include" = add an existing org member into this workspace.
+// "exclude" = remove a member from this workspace only (not from the org).
+func newWorkspaceMembersCmd(rt *runtime) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "members",
+		Short: "Manage members within a specific workspace",
+		Long: `Manage which organization members have access to a specific workspace.
+
+  include  Add an existing org member into this workspace.
+  exclude  Remove a member from this workspace only (they remain in the organization).
+  list     List members currently in this workspace.
+
+Use 'axme member' for org-level member management (invite, update role, remove from org).`,
+	}
+
+	var listOrgID string
+	var listWorkspaceID string
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List members in a workspace",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
+			orgID, workspaceID, err := rt.resolveEnterpriseWorkspaceContext(
+				cmd.Context(), ctx,
+				strings.TrimSpace(listOrgID),
+				strings.TrimSpace(listWorkspaceID),
+			)
+			if err != nil {
+				return err
+			}
+			members, err := rt.listEnterpriseMembers(cmd.Context(), ctx, orgID, workspaceID)
+			if err != nil {
+				return err
+			}
+			if rt.outputJSON {
+				return rt.printJSON(map[string]any{
+					"org_id":       orgID,
+					"workspace_id": workspaceID,
+					"members":      members,
+				})
+			}
+			printTable(
+				[]string{"MEMBER_ID", "ACTOR_ID", "ROLE", "STATUS", "UPDATED_AT"},
+				members,
+				[]string{"member_id", "actor_id", "role", "status", "updated_at"},
+			)
+			return nil
+		},
+	}
+	listCmd.Flags().StringVar(&listOrgID, "org-id", "", "organization id override")
+	listCmd.Flags().StringVar(&listWorkspaceID, "workspace-id", "", "workspace id override")
+
+	var includeOrgID string
+	var includeWorkspaceID string
+	var includeRole string
+	includeCmd := &cobra.Command{
+		Use:   "include <actor-id>",
+		Short: "Include an existing org member into this workspace",
+		Long: `Include an existing organization member into a specific workspace.
+The actor must already be a member of the organization.
+Their org-level role is not changed.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
+			orgID, workspaceID, err := rt.resolveEnterpriseWorkspaceContext(
+				cmd.Context(), ctx,
+				strings.TrimSpace(includeOrgID),
+				strings.TrimSpace(includeWorkspaceID),
+			)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(includeRole) == "" {
+				includeRole = "member"
+			}
+			result, err := rt.includeWorkspaceMember(cmd.Context(), ctx, workspaceID, orgID, strings.TrimSpace(args[0]), strings.TrimSpace(includeRole))
+			if err != nil {
+				return err
+			}
+			if rt.outputJSON {
+				return rt.printJSON(map[string]any{"ok": true, "org_id": orgID, "workspace_id": workspaceID, "member": result})
+			}
+			memberID := asString(result["member_id"])
+			actorID := asString(result["actor_id"])
+			if actorID == "" {
+				actorID = strings.TrimSpace(args[0])
+			}
+			fmt.Printf("Included %s in workspace %s (member_id: %s).\n", actorID, workspaceID, memberID)
+			return nil
+		},
+	}
+	includeCmd.Flags().StringVar(&includeOrgID, "org-id", "", "organization id override")
+	includeCmd.Flags().StringVar(&includeWorkspaceID, "workspace-id", "", "workspace id override")
+	includeCmd.Flags().StringVar(&includeRole, "role", "member", "workspace role for the included member")
+
+	var excludeWorkspaceID string
+	excludeCmd := &cobra.Command{
+		Use:   "exclude <member-id>",
+		Short: "Exclude a member from this workspace (they remain in the org)",
+		Long: `Remove a member from a specific workspace without removing them from the organization.
+The member retains their organization membership and can be included again later.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
+			_, workspaceID, err := rt.resolveEnterpriseWorkspaceContext(
+				cmd.Context(), ctx, "", strings.TrimSpace(excludeWorkspaceID),
+			)
+			if err != nil {
+				return err
+			}
+			memberID := strings.TrimSpace(args[0])
+			result, err := rt.excludeWorkspaceMember(cmd.Context(), ctx, workspaceID, memberID)
+			if err != nil {
+				return err
+			}
+			if rt.outputJSON {
+				return rt.printJSON(map[string]any{"ok": true, "workspace_id": workspaceID, "result": result})
+			}
+			fmt.Printf("Excluded member %s from workspace %s.\n", memberID, workspaceID)
+			fmt.Println("Note: they remain in the organization and can be re-included later.")
+			return nil
+		},
+	}
+	excludeCmd.Flags().StringVar(&excludeWorkspaceID, "workspace-id", "", "workspace id override")
+
+	cmd.AddCommand(listCmd, includeCmd, excludeCmd)
 	return cmd
 }
 
@@ -3165,6 +3311,49 @@ func (rt *runtime) removeEnterpriseMember(ctx context.Context, c *clientConfig, 
 		c,
 		"DELETE",
 		"/v1/organizations/"+orgID+"/members/"+memberID,
+		nil,
+		nil,
+		true,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, rt.enterpriseMembersAPIError(status, body, raw)
+	}
+	return asMap(body["result"]), nil
+}
+
+func (rt *runtime) includeWorkspaceMember(ctx context.Context, c *clientConfig, workspaceID, orgID, actorID, role string) (map[string]any, error) {
+	status, body, raw, err := rt.request(
+		ctx,
+		c,
+		"POST",
+		"/v1/workspaces/"+workspaceID+"/members/include",
+		nil,
+		map[string]any{
+			"actor_id":     actorID,
+			"role":         role,
+			"org_id":       orgID,
+			"workspace_id": workspaceID,
+		},
+		true,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, rt.enterpriseMembersAPIError(status, body, raw)
+	}
+	return asMap(body["member"]), nil
+}
+
+func (rt *runtime) excludeWorkspaceMember(ctx context.Context, c *clientConfig, workspaceID, memberID string) (map[string]any, error) {
+	status, body, raw, err := rt.request(
+		ctx,
+		c,
+		"DELETE",
+		"/v1/workspaces/"+workspaceID+"/members/"+memberID+"/exclude",
 		nil,
 		nil,
 		true,
