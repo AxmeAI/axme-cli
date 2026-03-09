@@ -17,8 +17,9 @@ const (
 )
 
 type storedContextSecrets struct {
-	APIKey     string `json:"api_key,omitempty"`
-	ActorToken string `json:"actor_token,omitempty"`
+	APIKey       string `json:"api_key,omitempty"`
+	ActorToken   string `json:"actor_token,omitempty"`
+	RefreshToken string `json:"refresh_token,omitempty"`
 }
 
 type secretStore interface {
@@ -52,6 +53,12 @@ func (s *keyringSecretStore) Load(contextName string) (storedContextSecrets, err
 	} else if !errors.Is(err, keyring.ErrNotFound) {
 		return storedContextSecrets{}, keyringUnavailableError(err)
 	}
+	refreshToken, err := keyring.Get(axmeCLIKeyringService, secretStoreUsername(contextName, "refresh_token"))
+	if err == nil {
+		secrets.RefreshToken = refreshToken
+	} else if !errors.Is(err, keyring.ErrNotFound) {
+		return storedContextSecrets{}, keyringUnavailableError(err)
+	}
 	return secrets, nil
 }
 
@@ -60,6 +67,9 @@ func (s *keyringSecretStore) Save(contextName string, secrets storedContextSecre
 		return err
 	}
 	if err := setOrDeleteKeyringSecret(contextName, "actor_token", secrets.ActorToken); err != nil {
+		return err
+	}
+	if err := setOrDeleteKeyringSecret(contextName, "refresh_token", secrets.RefreshToken); err != nil {
 		return err
 	}
 	return nil
@@ -95,8 +105,9 @@ func (s *fileSecretStore) Save(contextName string, secrets storedContextSecrets)
 		delete(allSecrets, contextName)
 	} else {
 		allSecrets[contextName] = storedContextSecrets{
-			APIKey:     strings.TrimSpace(secrets.APIKey),
-			ActorToken: strings.TrimSpace(secrets.ActorToken),
+			APIKey:       strings.TrimSpace(secrets.APIKey),
+			ActorToken:   strings.TrimSpace(secrets.ActorToken),
+			RefreshToken: strings.TrimSpace(secrets.RefreshToken),
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
