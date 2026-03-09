@@ -589,28 +589,42 @@ func newSessionCmd(rt *runtime) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return rt.printGeneric(map[string]any{
-					"ok":                                 revoked,
-					"session_id":                         sessionID,
-					"revoked":                            revoked,
-					"mode":                               "current_session",
-					"local_account_session_still_loaded": ctx.resolvedActorToken() != "",
-					"guidance_message":                   sessionRevokeGuidanceMessage("current_session", revoked),
-				})
+				if rt.outputJSON {
+					return rt.printJSON(map[string]any{
+						"ok":       revoked,
+						"session_id": sessionID,
+						"revoked":  revoked,
+						"mode":     "current_session",
+						"guidance_message": sessionRevokeGuidanceMessage("current_session", revoked),
+					})
+				}
+				if revoked {
+					fmt.Printf("Session %s revoked.\n", sessionID)
+				} else {
+					fmt.Printf("Could not revoke session %s.\n", sessionID)
+				}
+				return nil
 			}
 			sessionID := strings.TrimSpace(args[0])
 			revoked, err := rt.revokeAccountSessionByID(cmd.Context(), ctx, sessionID)
 			if err != nil {
 				return err
 			}
-			return rt.printGeneric(map[string]any{
-				"ok":                                 revoked,
-				"session_id":                         sessionID,
-				"revoked":                            revoked,
-				"mode":                               "explicit_session",
-				"local_account_session_still_loaded": ctx.resolvedActorToken() != "",
-				"guidance_message":                   sessionRevokeGuidanceMessage("explicit_session", revoked),
-			})
+			if rt.outputJSON {
+				return rt.printJSON(map[string]any{
+					"ok":       revoked,
+					"session_id": sessionID,
+					"revoked":  revoked,
+					"mode":     "explicit_session",
+					"guidance_message": sessionRevokeGuidanceMessage("explicit_session", revoked),
+				})
+			}
+			if revoked {
+				fmt.Printf("Session %s revoked.\n", sessionID)
+			} else {
+				fmt.Printf("Could not revoke session %s.\n", sessionID)
+			}
+			return nil
 		},
 	}
 	revokeCmd.Flags().BoolVar(&revokeCurrent, "current", false, "revoke the current account session")
