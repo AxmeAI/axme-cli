@@ -129,6 +129,87 @@ func (rt *runtime) runEmailLogin(ctx context.Context, ctxName string) error {
 		hydrated = true
 	}
 
+	// Interactive workspace selection when the user has multiple visible workspaces
+	// and no workspace was auto-selected by the server.
+	if !rt.outputJSON && c.resolvedActorToken() != "" && (c.OrgID == "" || c.WorkspaceID == "") {
+		if personalCtx, pErr := rt.personalContextFromServer(ctx, c); pErr == nil {
+			workspaces := asSlice(personalCtx["workspaces"])
+			selectedWS := asMap(personalCtx["selected_workspace"])
+			switch {
+			case len(workspaces) == 0:
+				fmt.Fprintln(os.Stderr)
+				fmt.Fprintln(os.Stderr, "  No workspaces found in your account. Contact support or run `axme quota upgrade-request`.")
+			case len(workspaces) == 1 && len(selectedWS) == 0:
+				// Auto-select the only workspace
+				ws := asMap(workspaces[0])
+				wsID := asString(ws["workspace_id"])
+				wsOrgID := asString(ws["org_id"])
+				wsName := asString(ws["name"])
+				if wsName == "" {
+					wsName = wsID
+				}
+				payload := map[string]any{"org_id": wsOrgID, "workspace_id": wsID}
+				if selStatus, selBody, _, selErr := rt.request(ctx, c, "POST", "/v1/portal/personal/workspace-selection", nil, payload, true); selErr == nil && selStatus < 400 {
+					selCtx := asMap(selBody["context"])
+					if v := asString(selCtx["org_id"]); v != "" {
+						c.OrgID = v
+					}
+					if v := asString(selCtx["workspace_id"]); v != "" {
+						c.WorkspaceID = v
+					}
+					hydrated = true
+					fmt.Fprintf(os.Stderr, "  Auto-selected workspace: %s\n", wsName)
+				}
+			case len(workspaces) > 1 && len(selectedWS) == 0:
+				// Prompt user to choose
+				fmt.Fprintln(os.Stderr)
+				fmt.Fprintln(os.Stderr, "  Multiple workspaces available. Choose one to set as active:")
+				for i, item := range workspaces {
+					ws := asMap(item)
+					name := asString(ws["name"])
+					if name == "" {
+						name = asString(ws["workspace_id"])
+					}
+					fmt.Fprintf(os.Stderr, "    [%d] %s  (%s)\n", i+1, name, asString(ws["workspace_id"]))
+				}
+				fmt.Fprintln(os.Stderr)
+				fmt.Fprint(os.Stderr, "  Enter number (or press Enter to skip): ")
+				reader := bufio.NewReader(os.Stdin)
+				line, _ := reader.ReadString('\n')
+				choice := strings.TrimSpace(line)
+				if choice != "" {
+					idx := 0
+					fmt.Sscanf(choice, "%d", &idx)
+					if idx >= 1 && idx <= len(workspaces) {
+						ws := asMap(workspaces[idx-1])
+						wsID := asString(ws["workspace_id"])
+						wsOrgID := asString(ws["org_id"])
+						wsName := asString(ws["name"])
+						if wsName == "" {
+							wsName = wsID
+						}
+						payload := map[string]any{"org_id": wsOrgID, "workspace_id": wsID}
+						if selStatus, selBody, _, selErr := rt.request(ctx, c, "POST", "/v1/portal/personal/workspace-selection", nil, payload, true); selErr == nil && selStatus < 400 {
+							selCtx := asMap(selBody["context"])
+							if v := asString(selCtx["org_id"]); v != "" {
+								c.OrgID = v
+							}
+							if v := asString(selCtx["workspace_id"]); v != "" {
+								c.WorkspaceID = v
+							}
+							hydrated = true
+							fmt.Fprintf(os.Stderr, "  Active workspace set to: %s\n", wsName)
+						}
+					} else {
+						fmt.Fprintln(os.Stderr, "  Invalid choice — skipped. Run `axme workspace use <id>` to set it later.")
+					}
+				} else {
+					fmt.Fprintln(os.Stderr, "  Skipped. Run `axme workspace list` then `axme workspace use <id>` to set it.")
+				}
+			}
+		}
+	}
+
 	if err := rt.persistConfig(); err != nil {
 		return err
 	}
