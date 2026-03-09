@@ -53,7 +53,6 @@ State and events can be accessed through:
 - **Stream logs and traces** — follow live intent event streams from the terminal
 - **Diagnose** — run `doctor` to check config, connectivity, and auth health
 - **Quota** — `axme quota show` to view limits and usage; `axme quota upgrade-request` to request a corporate-tier upgrade
-- **Admin (platform owner)** — `axme admin` sub-commands for user management, quota overrides, access-request review, scheduler health, and audit log (requires `platform_admin` JWT)
 
 ---
 
@@ -209,11 +208,13 @@ Add `--json` to any command for machine-readable output.
 
 ### Service Accounts and Keys
 ```bash
-axme service-accounts create --org-id <org_id> --workspace-id <ws_id> --name <name> --created-by-actor-id <actor_id>
-axme service-accounts list --org-id <org_id> [--workspace-id <ws_id>]
-axme service-accounts keys create --service-account-id <sa_id> --created-by-actor-id <actor_id>
+axme service-accounts create --name <name>
+axme service-accounts list
+axme service-accounts keys create --service-account-id <sa_id>
 axme service-accounts keys revoke --service-account-id <sa_id> --key-id <sak_id>
 ```
+
+`axme service-accounts ...` uses the active account session plus workspace API key. The CLI resolves the effective organization/workspace from your selected personal context unless you override it explicitly.
 
 ### Quota
 ```bash
@@ -241,32 +242,7 @@ overage_mode=block  hard_enforcement=true
 To request higher limits: axme quota upgrade-request --company "..." --justification "..."
 ```
 
-### Admin (Platform Owner — requires platform_admin JWT)
-```bash
-axme admin users list [--domain <prefix>] [--email <prefix>] [--limit <n>]
-axme admin users suspend --org-id <org_id> [--reason "<text>"]
-axme admin users unsuspend --org-id <org_id>
-
-axme admin quota get --org-id <org_id> --workspace-id <ws_id>
-axme admin quota set --org-id <org_id> --workspace-id <ws_id> \
-  --intents-per-day <n> [--actors-total <n>] [--service-accounts <n>]
-axme admin quota reset --org-id <org_id> --workspace-id <ws_id> \
-  --tier <unverified|email_verified|corporate>
-
-axme admin scheduler health          # GET /health with component table
-
-axme admin audit [--action <prefix>] [--owner-agent <agent>] [--limit <n>]
-
-# Review quota upgrade and access requests submitted by users
-axme admin access-requests list [--state pending] [--type quota_upgrade] [--limit <n>]
-axme admin access-requests review \
-  --id <request_id> \
-  --decision <approve|reject|waitlist> \
-  --reviewer-actor-id <actor_id> \
-  [--comment "<text>"]
-```
-
-Approving a `quota_upgrade` request automatically applies the requested tier to the user's workspace — no manual quota override needed.
+Platform-operator workflows are intentionally not part of the public `axme` user CLI. Internal operators should use the dedicated tooling and contract documentation in `axme-security-ops`.
 
 ---
 
