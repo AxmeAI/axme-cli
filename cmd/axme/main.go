@@ -49,19 +49,21 @@ type appConfig struct {
 }
 
 type clientConfig struct {
-	BaseURL     string `json:"base_url"`
-	APIKey      string `json:"api_key,omitempty"`
-	ActorToken  string `json:"actor_token,omitempty"`
-	BearerToken string `json:"bearer_token,omitempty"`
-	OwnerAgent  string `json:"owner_agent,omitempty"`
-	OrgID       string `json:"org_id,omitempty"`
-	WorkspaceID string `json:"workspace_id,omitempty"`
-	Environment string `json:"environment,omitempty"`
+	BaseURL       string `json:"base_url"`
+	APIKey        string `json:"api_key,omitempty"`
+	ActorToken    string `json:"actor_token,omitempty"`
+	BearerToken   string `json:"bearer_token,omitempty"`
+	OwnerAgent    string `json:"owner_agent,omitempty"`
+	OrgID         string `json:"org_id,omitempty"`
+	WorkspaceID   string `json:"workspace_id,omitempty"`
+	Environment   string `json:"environment,omitempty"`
+	secretsLoaded bool   `json:"-"`
 }
 
 type runtime struct {
 	cfgFile      string
 	cfg          *appConfig
+	secretStore  secretStore
 	httpClient   *http.Client
 	outputJSON   bool
 	contextName  string
@@ -106,6 +108,15 @@ func run() int {
 			Timeout: 25 * time.Second,
 		},
 	}
+	secretStore, err := initSecretStore(cfgFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	rt.secretStore = secretStore
+	if warning := secretStorageFallbackWarning(rt.secretStore); warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
+	}
 	root := buildRoot(rt)
 	if err := root.Execute(); err != nil {
 		var ce *cliError
@@ -139,6 +150,10 @@ func buildRoot(rt *runtime) *cobra.Command {
 		newLoginCmd(rt),
 		newLogoutCmd(rt),
 		newWhoamiCmd(rt),
+		newSessionCmd(rt),
+		newOrgCmd(rt),
+		newWorkspaceCmd(rt),
+		newMemberCmd(rt),
 		newContextCmd(rt),
 		newInitCmd(rt),
 		newExamplesCmd(rt),
@@ -154,7 +169,6 @@ func buildRoot(rt *runtime) *cobra.Command {
 		newVersionCmd(rt),
 		newRawCmd(rt),
 		newQuotaCmd(rt),
-		newAdminCmd(rt),
 	)
 	return cmd
 }
@@ -166,23 +180,39 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 	var targetContext string
 	var useWebOnboarding bool
 	var useDeviceFlow bool
+	var useAlphaBootstrap bool
 	var noBrowser bool
 	var onboardingURL string
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Sign in, bootstrap alpha workspace, or store credentials",
+		Short: "Sign in to your AXME account",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if onboardingURL == "" {
 				onboardingURL = defaultAlphaOnboardingURL
 			}
-			// Device/browser flow: no API key required upfront
-			if useDeviceFlow {
+			shouldUseAccountLogin := useDeviceFlow
+			if !shouldUseAccountLogin && key == "" && token == "" && interactiveInputAvailable() && !useWebOnboarding && !useAlphaBootstrap {
+				shouldUseAccountLogin = true
+			}
+			// Account-first device/browser flow: no API key required upfront
+			if shouldUseAccountLogin {
 				ctxName := targetContext
 				if ctxName == "" {
 					ctxName = rt.activeContextName()
 				}
-				prepareCloudAlphaContext(rt.ensureContext(ctxName))
-				return rt.runDeviceLogin(cmd.Context(), ctxName)
+				accountCtx := rt.ensureContext(ctxName)
+				prepareCloudAlphaContext(accountCtx)
+				if key != "" {
+					accountCtx.APIKey = strings.TrimSpace(key)
+				}
+				if token != "" {
+					accountCtx.setActorToken(strings.TrimSpace(token))
+				}
+				if owner != "" {
+					accountCtx.OwnerAgent = strings.TrimSpace(owner)
+				}
+				rt.applyPersistentContextOverrides(accountCtx)
+				return rt.runDeviceLogin(cmd.Context(), ctxName, !noBrowser)
 			}
 			if key == "" && token == "" {
 				if interactiveInputAvailable() {
@@ -197,26 +227,24 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 							return err
 						}
 						key = enteredKey
+					} else if useAlphaBootstrap {
+						ctxName := targetContext
+						if ctxName == "" {
+							ctxName = rt.activeContextName()
+						}
+						return rt.runAlphaBootstrapLogin(cmd.Context(), ctxName)
 					} else {
-						enteredKey, err := promptLine("AXME API key (press Enter to start cloud alpha onboarding in CLI): ")
+						enteredKey, err := promptLine("AXME API key (or press Enter to cancel): ")
 						if err != nil {
 							return err
 						}
-						if enteredKey == "" {
-							ctxName := targetContext
-							if ctxName == "" {
-								ctxName = rt.activeContextName()
-							}
-							return rt.runAlphaBootstrapLogin(cmd.Context(), ctxName)
-						} else {
-							key = enteredKey
-						}
+						key = enteredKey
 					}
 				}
 			}
 			if key == "" && token == "" {
 				msg := fmt.Sprintf(
-					"No credentials were stored. Run `axme login` interactively to create or attach a cloud alpha workspace, use --api-key/--actor-token directly, or open %s for CLI onboarding instructions.",
+					"No credentials were stored. Run `axme login` interactively to sign in to your account, use --api-key/--actor-token for manual recovery, or open %s for legacy alpha onboarding instructions.",
 					onboardingURL,
 				)
 				if rt.outputJSON {
@@ -224,6 +252,7 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 						"ok":             true,
 						"deferred":       true,
 						"onboarding_url": onboardingURL,
+						"recommended":    "axme login",
 						"message":        msg,
 					})
 				}
@@ -244,6 +273,7 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 			if owner != "" {
 				ctx.OwnerAgent = strings.TrimSpace(owner)
 			}
+			rt.applyPersistentContextOverrides(ctx)
 			var hydrated bool
 			var hydrateWarning string
 			if resolvedContext, err := rt.hydrateContextFromServer(cmd.Context(), ctx); err == nil {
@@ -264,15 +294,16 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 					)
 				}
 			}
-			if err := saveConfig(rt.cfgFile, rt.cfg); err != nil {
+			if err := rt.persistConfig(); err != nil {
 				return err
 			}
 			body := map[string]any{
-				"ok":           true,
-				"context":      ctxName,
-				"hydrated":     hydrated,
-				"org_id":       ctx.OrgID,
-				"workspace_id": ctx.WorkspaceID,
+				"ok":                  true,
+				"context":             ctxName,
+				"hydrated":            hydrated,
+				"org_id":              ctx.OrgID,
+				"workspace_id":        ctx.WorkspaceID,
+				"has_account_session": ctx.resolvedActorToken() != "",
 			}
 			if hydrateWarning != "" {
 				body["warning"] = hydrateWarning
@@ -286,10 +317,13 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 	cmd.Flags().StringVar(&owner, "owner-agent", "", "Owner agent (e.g. agent://alice)")
 	cmd.Flags().StringVar(&targetContext, "context", "", "Target context name")
 	cmd.Flags().BoolVar(&useWebOnboarding, "web", false, "legacy fallback")
-	cmd.Flags().BoolVar(&useDeviceFlow, "device", false, "browser device flow: open approval page and wait for confirmation (no copy-paste)")
+	cmd.Flags().BoolVar(&useDeviceFlow, "device", false, "legacy alias for the default account sign-in flow")
+	cmd.Flags().BoolVar(&useAlphaBootstrap, "bootstrap-alpha", false, "legacy alpha bootstrap flow")
 	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't try to open browser automatically during login")
 	cmd.Flags().StringVar(&onboardingURL, "onboarding-url", defaultAlphaOnboardingURL, "CLI onboarding page URL")
+	_ = cmd.Flags().MarkHidden("device")
 	_ = cmd.Flags().MarkHidden("web")
+	_ = cmd.Flags().MarkHidden("bootstrap-alpha")
 	_ = cmd.Flags().MarkHidden("onboarding-url")
 	return cmd
 }
@@ -350,7 +384,7 @@ func (rt *runtime) runAlphaBootstrapLogin(ctx context.Context, ctxName string) e
 		c.WorkspaceID = workspaceID
 	}
 
-	if err := saveConfig(rt.cfgFile, rt.cfg); err != nil {
+	if err := rt.persistConfig(); err != nil {
 		return err
 	}
 
@@ -392,7 +426,10 @@ func newWhoamiCmd(rt *runtime) *cobra.Command {
 		Use:   "whoami",
 		Short: "Show current identity and context",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := rt.effectiveContext()
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
 			out := map[string]any{
 				"context":      rt.activeContextName(),
 				"base_url":     ctx.BaseURL,
@@ -400,11 +437,43 @@ func newWhoamiCmd(rt *runtime) *cobra.Command {
 				"workspace_id": ctx.WorkspaceID,
 				"owner_agent":  ctx.OwnerAgent,
 				"environment":  ctx.Environment,
+				"secret_storage": map[string]any{
+					"mode":   rt.secretStore.Mode(),
+					"detail": rt.secretStore.Detail(),
+				},
+				"status": map[string]any{
+					"has_workspace_access_token": ctx.APIKey != "",
+					"has_account_session":        ctx.resolvedActorToken() != "",
+					"has_local_workspace_cache":  ctx.OrgID != "" && ctx.WorkspaceID != "",
+				},
+			}
+			if personalContext, err := rt.personalContextFromServer(cmd.Context(), ctx); err == nil {
+				out["server_context"] = asMap(personalContext["context"])
+				if account := asMap(personalContext["account"]); len(account) > 0 {
+					out["account"] = account
+				}
+				if selectedOrg := asMap(personalContext["selected_organization"]); len(selectedOrg) > 0 {
+					out["selected_organization"] = selectedOrg
+				}
+				if selectedWorkspace := asMap(personalContext["selected_workspace"]); len(selectedWorkspace) > 0 {
+					out["selected_workspace"] = selectedWorkspace
+				}
+				if guidance := asMap(personalContext["guidance"]); len(guidance) > 0 {
+					out["server_guidance"] = guidance
+				}
+				status := asMap(out["status"])
+				status["account_signed_in"] = true
+				status["workspace_attached"] = len(asMap(personalContext["selected_workspace"])) > 0
+				status["membership_count"] = len(asSlice(personalContext["workspaces"]))
+				out["status"] = status
+			} else {
+				out["server_context_error"] = err.Error()
 			}
 			if ctx.resolvedActorToken() != "" {
-				_, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/auth/sessions", map[string]string{"include_revoked": "false"}, nil, false)
+				sessions, err := rt.listAccountSessions(cmd.Context(), ctx, false)
 				if err == nil {
-					out["sessions"] = body["sessions"]
+					out["sessions"] = sessions
+					out["session_summary"] = accountSessionSummary(sessions, false)
 				} else {
 					out["sessions_error"] = err.Error()
 				}
@@ -414,25 +483,540 @@ func newWhoamiCmd(rt *runtime) *cobra.Command {
 	}
 }
 
+func newSessionCmd(rt *runtime) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "session",
+		Short: "Inspect and revoke account sessions",
+	}
+
+	var includeRevoked bool
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List account sessions for the current human account",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
+			if ctx.resolvedActorToken() == "" {
+				return &cliError{Code: 2, Msg: personalContextRequirementMessage("missing account session")}
+			}
+			sessions, err := rt.listAccountSessions(cmd.Context(), ctx, includeRevoked)
+			if err != nil {
+				return err
+			}
+			summary := accountSessionSummary(sessions, includeRevoked)
+			if rt.outputJSON {
+				return rt.printJSON(map[string]any{
+					"sessions":        sessions,
+					"include_revoked": includeRevoked,
+					"summary":         summary,
+				})
+			}
+			printTable(
+				[]string{"SESSION_ID", "CURRENT", "CLIENT", "DEVICE", "CREATED_AT", "EXPIRES_AT", "REVOKED_AT"},
+				sessions,
+				[]string{"session_id", "is_current", "client_type", "device_label", "created_at", "expires_at", "revoked_at"},
+			)
+			if message := asString(summary["guidance_message"]); message != "" {
+				fmt.Println()
+				fmt.Println(message)
+			}
+			return nil
+		},
+	}
+	listCmd.Flags().BoolVar(&includeRevoked, "all", false, "include revoked sessions")
+
+	var revokeCurrent bool
+	revokeCmd := &cobra.Command{
+		Use:   "revoke <session-id>",
+		Short: "Revoke an account session",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if revokeCurrent {
+				if len(args) != 0 {
+					return &cliError{Code: 2, Msg: "do not pass a session id when using --current"}
+				}
+				return nil
+			}
+			if len(args) != 1 {
+				return &cliError{Code: 2, Msg: "usage: axme session revoke <session-id> or axme session revoke --current"}
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
+			if ctx.resolvedActorToken() == "" {
+				return &cliError{Code: 2, Msg: personalContextRequirementMessage("missing account session")}
+			}
+			if revokeCurrent {
+				sessionID, revoked, err := rt.revokeCurrentAccountSession(cmd.Context(), ctx)
+				if err != nil {
+					return err
+				}
+				return rt.printGeneric(map[string]any{
+					"ok":                                 revoked,
+					"session_id":                         sessionID,
+					"revoked":                            revoked,
+					"mode":                               "current_session",
+					"local_account_session_still_loaded": ctx.resolvedActorToken() != "",
+					"guidance_message":                   sessionRevokeGuidanceMessage("current_session", revoked),
+				})
+			}
+			sessionID := strings.TrimSpace(args[0])
+			revoked, err := rt.revokeAccountSessionByID(cmd.Context(), ctx, sessionID)
+			if err != nil {
+				return err
+			}
+			return rt.printGeneric(map[string]any{
+				"ok":                                 revoked,
+				"session_id":                         sessionID,
+				"revoked":                            revoked,
+				"mode":                               "explicit_session",
+				"local_account_session_still_loaded": ctx.resolvedActorToken() != "",
+				"guidance_message":                   sessionRevokeGuidanceMessage("explicit_session", revoked),
+			})
+		},
+	}
+	revokeCmd.Flags().BoolVar(&revokeCurrent, "current", false, "revoke the current account session")
+
+	cmd.AddCommand(listCmd, revokeCmd)
+
+	return cmd
+}
+
+func newOrgCmd(rt *runtime) *cobra.Command {
+	cmd := &cobra.Command{Use: "org", Short: "List organizations visible to the current account session"}
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:   "list",
+			Short: "List organizations from personal context",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				ctx, err := rt.effectiveContextWithSecrets()
+				if err != nil {
+					return err
+				}
+				body, err := rt.personalContextFromServer(cmd.Context(), ctx)
+				if err != nil {
+					return err
+				}
+				organizations := asSlice(body["organizations"])
+				summary := personalContextSummary(body)
+				if rt.outputJSON {
+					out := map[string]any{
+						"organizations":         organizations,
+						"selected_organization": asMap(body["selected_organization"]),
+					}
+					for k, v := range summary {
+						out[k] = v
+					}
+					return rt.printJSON(out)
+				}
+				selectedOrgID := asString(asMap(body["selected_organization"])["org_id"])
+				rows := make([]map[string]any, 0, len(organizations))
+				for _, item := range organizations {
+					org := asMap(item)
+					rows = append(rows, map[string]any{
+						"selected":   asString(org["org_id"]) == selectedOrgID,
+						"org_id":     asString(org["org_id"]),
+						"name":       asString(org["name"]),
+						"status":     asString(org["status"]),
+						"roles":      strings.Join(asStringSlice(org["roles"]), ","),
+						"workspaces": len(asSlice(org["workspaces"])),
+					})
+				}
+				printTable(
+					[]string{"SELECTED", "ORG_ID", "NAME", "STATUS", "ROLES", "WORKSPACES"},
+					rows,
+					[]string{"selected", "org_id", "name", "status", "roles", "workspaces"},
+				)
+				if message := personalContextGuidanceMessage(body); message != "" {
+					fmt.Println()
+					fmt.Println(message)
+				}
+				return nil
+			},
+		},
+	)
+	return cmd
+}
+
+func newMemberCmd(rt *runtime) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "member",
+		Short: "Manage organization and workspace members",
+	}
+
+	var listOrgID string
+	var listWorkspaceID string
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List members in an organization or workspace",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
+			orgID, err := rt.resolveEnterpriseOrganizationContext(cmd.Context(), ctx, strings.TrimSpace(listOrgID))
+			if err != nil {
+				return err
+			}
+			workspaceID := strings.TrimSpace(listWorkspaceID)
+			members, err := rt.listEnterpriseMembers(cmd.Context(), ctx, orgID, workspaceID)
+			if err != nil {
+				return err
+			}
+			if rt.outputJSON {
+				return rt.printJSON(map[string]any{
+					"org_id":       orgID,
+					"workspace_id": workspaceID,
+					"scope":        memberScopeSummary(orgID, workspaceID),
+					"members":      members,
+				})
+			}
+			printTable(
+				[]string{"MEMBER_ID", "ACTOR_ID", "ROLE", "STATUS", "WORKSPACE_ID", "UPDATED_AT"},
+				members,
+				[]string{"member_id", "actor_id", "role", "status", "workspace_id", "updated_at"},
+			)
+			if message := memberListGuidance(ctx, orgID, workspaceID); message != "" {
+				fmt.Println()
+				fmt.Println(message)
+			}
+			return nil
+		},
+	}
+	listCmd.Flags().StringVar(&listOrgID, "org-id", "", "organization id override")
+	listCmd.Flags().StringVar(&listWorkspaceID, "workspace-id", "", "workspace id filter")
+
+	var addOrgID string
+	var addWorkspaceID string
+	var addRole string
+	addCmd := &cobra.Command{
+		Use:   "add <actor-id>",
+		Short: "Add a workspace member",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
+			orgID, workspaceID, err := rt.resolveEnterpriseWorkspaceContext(
+				cmd.Context(),
+				ctx,
+				strings.TrimSpace(addOrgID),
+				strings.TrimSpace(addWorkspaceID),
+			)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(addRole) == "" {
+				return &cliError{Code: 2, Msg: "Role is required. Pass `--role`."}
+			}
+			member, err := rt.addEnterpriseMember(cmd.Context(), ctx, orgID, workspaceID, strings.TrimSpace(args[0]), strings.TrimSpace(addRole))
+			if err != nil {
+				return err
+			}
+			return rt.printGeneric(map[string]any{
+				"ok":           true,
+				"org_id":       orgID,
+				"workspace_id": workspaceID,
+				"scope":        memberScopeSummary(orgID, workspaceID),
+				"member":       member,
+			})
+		},
+	}
+	addCmd.Flags().StringVar(&addOrgID, "org-id", "", "organization id override")
+	addCmd.Flags().StringVar(&addWorkspaceID, "workspace-id", "", "workspace id override")
+	addCmd.Flags().StringVar(&addRole, "role", "", "member role")
+
+	var updateOrgID string
+	var updateRole string
+	var updateStatus string
+	updateCmd := &cobra.Command{
+		Use:   "update <member-id>",
+		Short: "Update a member role or status",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
+			orgID, err := rt.resolveEnterpriseOrganizationContext(cmd.Context(), ctx, strings.TrimSpace(updateOrgID))
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(updateRole) == "" && strings.TrimSpace(updateStatus) == "" {
+				return &cliError{Code: 2, Msg: "Nothing to update. Pass `--role` and/or `--status`."}
+			}
+			member, err := rt.updateEnterpriseMember(cmd.Context(), ctx, orgID, strings.TrimSpace(args[0]), strings.TrimSpace(updateRole), strings.TrimSpace(updateStatus))
+			if err != nil {
+				return err
+			}
+			workspaceID := asString(member["workspace_id"])
+			return rt.printGeneric(map[string]any{
+				"ok":           true,
+				"org_id":       orgID,
+				"workspace_id": workspaceID,
+				"scope":        memberScopeSummary(orgID, workspaceID),
+				"member":       member,
+			})
+		},
+	}
+	updateCmd.Flags().StringVar(&updateOrgID, "org-id", "", "organization id override")
+	updateCmd.Flags().StringVar(&updateRole, "role", "", "updated member role")
+	updateCmd.Flags().StringVar(&updateStatus, "status", "", "updated member status")
+
+	var removeOrgID string
+	removeCmd := &cobra.Command{
+		Use:   "remove <member-id>",
+		Short: "Remove a member from the organization/workspace",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
+			orgID, err := rt.resolveEnterpriseOrganizationContext(cmd.Context(), ctx, strings.TrimSpace(removeOrgID))
+			if err != nil {
+				return err
+			}
+			result, err := rt.removeEnterpriseMember(cmd.Context(), ctx, orgID, strings.TrimSpace(args[0]))
+			if err != nil {
+				return err
+			}
+			workspaceID := asString(result["workspace_id"])
+			return rt.printGeneric(map[string]any{
+				"ok":           true,
+				"org_id":       orgID,
+				"workspace_id": workspaceID,
+				"scope":        memberScopeSummary(orgID, workspaceID),
+				"result":       result,
+			})
+		},
+	}
+	removeCmd.Flags().StringVar(&removeOrgID, "org-id", "", "organization id override")
+
+	cmd.AddCommand(listCmd, addCmd, updateCmd, removeCmd)
+	return cmd
+}
+
+func newWorkspaceCmd(rt *runtime) *cobra.Command {
+	cmd := &cobra.Command{Use: "workspace", Short: "List or select workspaces from personal context"}
+
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:   "list",
+			Short: "List workspaces from personal context",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				ctx, err := rt.effectiveContextWithSecrets()
+				if err != nil {
+					return err
+				}
+				body, err := rt.personalContextFromServer(cmd.Context(), ctx)
+				if err != nil {
+					return err
+				}
+				workspaces := asSlice(body["workspaces"])
+				summary := personalContextSummary(body)
+				if rt.outputJSON {
+					out := map[string]any{
+						"workspaces":         workspaces,
+						"selected_workspace": asMap(body["selected_workspace"]),
+						"selected_org":       asMap(body["selected_organization"]),
+						"server_context":     asMap(body["context"]),
+					}
+					for k, v := range summary {
+						out[k] = v
+					}
+					return rt.printJSON(out)
+				}
+				selectedWorkspaceID := asString(asMap(body["selected_workspace"])["workspace_id"])
+				rows := make([]map[string]any, 0, len(workspaces))
+				for _, item := range workspaces {
+					workspace := asMap(item)
+					rows = append(rows, map[string]any{
+						"selected":     asString(workspace["workspace_id"]) == selectedWorkspaceID,
+						"workspace_id": asString(workspace["workspace_id"]),
+						"name":         asString(workspace["name"]),
+						"org_id":       asString(workspace["org_id"]),
+						"org_name":     asString(workspace["org_name"]),
+						"env":          asString(workspace["environment"]),
+						"status":       asString(workspace["status"]),
+						"roles":        strings.Join(asStringSlice(workspace["roles"]), ","),
+					})
+				}
+				printTable(
+					[]string{"SELECTED", "WORKSPACE_ID", "NAME", "ORG_ID", "ORG_NAME", "ENV", "STATUS", "ROLES"},
+					rows,
+					[]string{"selected", "workspace_id", "name", "org_id", "org_name", "env", "status", "roles"},
+				)
+				if message := personalContextGuidanceMessage(body); message != "" {
+					fmt.Println()
+					fmt.Println(message)
+				}
+				return nil
+			},
+		},
+	)
+
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:   "use <workspace>",
+			Short: "Select active workspace from personal context",
+			Args:  cobra.ExactArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				target := strings.TrimSpace(args[0])
+				if target == "" {
+					return &cliError{Code: 2, Msg: "workspace identifier is required"}
+				}
+				activeContextName := rt.activeContextName()
+				ctx, err := rt.contextWithSecrets(activeContextName)
+				if err != nil {
+					return err
+				}
+				requestContext, err := rt.effectiveContextWithSecrets()
+				if err != nil {
+					return err
+				}
+				body, err := rt.personalContextFromServer(cmd.Context(), requestContext)
+				if err != nil {
+					return err
+				}
+				workspaces := asSlice(body["workspaces"])
+				var exactID map[string]any
+				nameMatches := make([]map[string]any, 0)
+				for _, item := range workspaces {
+					workspace := asMap(item)
+					if asString(workspace["workspace_id"]) == target {
+						exactID = workspace
+						break
+					}
+					if strings.EqualFold(asString(workspace["name"]), target) {
+						nameMatches = append(nameMatches, workspace)
+					}
+				}
+				selectedWorkspace := exactID
+				if len(selectedWorkspace) == 0 {
+					if len(nameMatches) == 1 {
+						selectedWorkspace = nameMatches[0]
+					} else if len(nameMatches) > 1 {
+						return &cliError{Code: 2, Msg: "workspace name is ambiguous; use workspace_id"}
+					}
+				}
+				if len(selectedWorkspace) == 0 {
+					return &cliError{Code: 2, Msg: "workspace not found in personal context"}
+				}
+				payload := map[string]any{
+					"org_id":       asString(selectedWorkspace["org_id"]),
+					"workspace_id": asString(selectedWorkspace["workspace_id"]),
+				}
+				status, responseBody, raw, err := rt.request(
+					cmd.Context(),
+					requestContext,
+					"POST",
+					"/v1/portal/personal/workspace-selection",
+					nil,
+					payload,
+					true,
+				)
+				if err != nil {
+					return err
+				}
+				if status >= 400 {
+					return rt.personalWorkspaceSelectionAPIError(status, responseBody, raw)
+				}
+				serverContext := asMap(responseBody["context"])
+				if orgID := asString(serverContext["org_id"]); orgID != "" {
+					ctx.OrgID = orgID
+				}
+				if workspaceID := asString(serverContext["workspace_id"]); workspaceID != "" {
+					ctx.WorkspaceID = workspaceID
+				}
+				if err := rt.persistConfig(); err != nil {
+					return err
+				}
+				return rt.printGeneric(map[string]any{
+					"ok":                    true,
+					"context":               rt.activeContextName(),
+					"org_id":                ctx.OrgID,
+					"workspace_id":          ctx.WorkspaceID,
+					"selected_workspace":    asMap(responseBody["selected_workspace"]),
+					"selected_organization": asMap(responseBody["selected_organization"]),
+					"server_context":        serverContext,
+				})
+			},
+		},
+	)
+
+	return cmd
+}
+
 func newLogoutCmd(rt *runtime) *cobra.Command {
 	var all bool
+	var allSessions bool
 	cmd := &cobra.Command{
 		Use:   "logout",
 		Short: "Clear stored credentials for active context",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := rt.ensureContext(rt.activeContextName())
+			ctx, err := rt.contextWithSecrets(rt.activeContextName())
+			if err != nil {
+				return err
+			}
+			serverResult := map[string]any{
+				"attempted": false,
+				"revoked":   false,
+			}
+			if actorToken := ctx.resolvedActorToken(); actorToken != "" {
+				serverResult["attempted"] = true
+				if allSessions {
+					serverResult["mode"] = "all_sessions"
+					status, err := rt.logoutAllAccountSessions(cmd.Context(), ctx)
+					if err != nil {
+						serverResult["error"] = err.Error()
+					} else {
+						serverResult["revoked"] = true
+						serverResult["status"] = status
+					}
+				} else {
+					serverResult["mode"] = "current_session"
+					sessionID, revoked, err := rt.revokeCurrentAccountSession(cmd.Context(), ctx)
+					if sessionID != "" {
+						serverResult["session_id"] = sessionID
+					}
+					serverResult["revoked"] = revoked
+					if err != nil {
+						serverResult["error"] = err.Error()
+					}
+				}
+			}
 			ctx.setActorToken("")
 			if all {
 				ctx.APIKey = ""
 			}
-			if err := saveConfig(rt.cfgFile, rt.cfg); err != nil {
+			if err := rt.persistConfig(); err != nil {
 				return err
 			}
-			return rt.printResult(200, map[string]any{"ok": true, "context": rt.activeContextName(), "api_key_cleared": all})
+			serverResult["local_account_session_present"] = false
+			serverResult["local_workspace_api_key_present"] = !all && ctx.APIKey != ""
+			return rt.printResult(200, map[string]any{
+				"ok":                              true,
+				"context":                         rt.activeContextName(),
+				"api_key_cleared":                 all,
+				"workspace_api_key_remaining":     !all && ctx.APIKey != "",
+				"account_session_cleared":         true,
+				"local_account_session_present":   false,
+				"local_workspace_api_key_present": !all && ctx.APIKey != "",
+				"server_logout":                   serverResult,
+				"guidance_message":                logoutGuidanceMessage(all, serverResult),
+			})
 		},
 		Args: cobra.NoArgs,
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "clear API key as well")
+	cmd.Flags().BoolVar(&allSessions, "all-sessions", false, "revoke all server-side account sessions before clearing local credentials")
 	return cmd
 }
 
@@ -446,6 +1030,22 @@ func newContextCmd(rt *runtime) *cobra.Command {
 				rows := make([]map[string]any, 0, len(rt.cfg.Contexts))
 				for name, c := range rt.cfg.Contexts {
 					c.normalizeActorToken()
+					if err := rt.loadSecretsIntoContext(name, c); err != nil {
+						rows = append(rows, map[string]any{
+							"name":         name,
+							"active":       name == rt.activeContextName(),
+							"base_url":     c.BaseURL,
+							"org_id":       c.OrgID,
+							"workspace_id": c.WorkspaceID,
+							"owner_agent":  c.OwnerAgent,
+							"environment":  c.Environment,
+							"has_api_key":  false,
+							"has_actor":    false,
+							"has_bearer":   false,
+							"secret_error": err.Error(),
+						})
+						continue
+					}
 					rows = append(rows, map[string]any{
 						"name":         name,
 						"active":       name == rt.activeContextName(),
@@ -457,12 +1057,13 @@ func newContextCmd(rt *runtime) *cobra.Command {
 						"has_api_key":  c.APIKey != "",
 						"has_actor":    c.resolvedActorToken() != "",
 						"has_bearer":   c.BearerToken != "",
+						"secret_error": "",
 					})
 				}
 				if rt.outputJSON {
 					return rt.printJSON(rows)
 				}
-				printTable([]string{"NAME", "ACTIVE", "BASE_URL", "ORG", "WORKSPACE", "OWNER", "ENV", "API_KEY", "ACTOR", "BEARER"}, rows, []string{"name", "active", "base_url", "org_id", "workspace_id", "owner_agent", "environment", "has_api_key", "has_actor", "has_bearer"})
+				printTable([]string{"NAME", "ACTIVE", "BASE_URL", "ORG", "WORKSPACE", "OWNER", "ENV", "API_KEY", "ACTOR", "BEARER", "SECRET_ERROR"}, rows, []string{"name", "active", "base_url", "org_id", "workspace_id", "owner_agent", "environment", "has_api_key", "has_actor", "has_bearer", "secret_error"})
 				return nil
 			},
 		},
@@ -471,8 +1072,11 @@ func newContextCmd(rt *runtime) *cobra.Command {
 			Short: "Show active context",
 			RunE: func(cmd *cobra.Command, args []string) error {
 				name := rt.activeContextName()
-				c := rt.effectiveContext()
-				return rt.printGeneric(map[string]any{
+				c, err := rt.effectiveContextWithSecrets()
+				if err != nil {
+					return err
+				}
+				out := map[string]any{
 					"name":         name,
 					"base_url":     c.BaseURL,
 					"org_id":       c.OrgID,
@@ -482,7 +1086,24 @@ func newContextCmd(rt *runtime) *cobra.Command {
 					"has_api_key":  c.APIKey != "",
 					"has_actor":    c.resolvedActorToken() != "",
 					"has_bearer":   c.BearerToken != "",
-				})
+				}
+				if personalContext, err := rt.personalContextFromServer(cmd.Context(), c); err == nil {
+					if serverContext := asMap(personalContext["context"]); len(serverContext) > 0 {
+						out["server_context"] = serverContext
+					}
+					if selectedOrg := asMap(personalContext["selected_organization"]); len(selectedOrg) > 0 {
+						out["selected_organization"] = selectedOrg
+					}
+					if selectedWorkspace := asMap(personalContext["selected_workspace"]); len(selectedWorkspace) > 0 {
+						out["selected_workspace"] = selectedWorkspace
+					}
+					if guidance := asMap(personalContext["guidance"]); len(guidance) > 0 {
+						out["server_guidance"] = guidance
+					}
+				} else {
+					out["server_context_error"] = err.Error()
+				}
+				return rt.printGeneric(out)
 			},
 		},
 		newContextUseCmd(rt),
@@ -501,11 +1122,40 @@ func newContextUseCmd(rt *runtime) *cobra.Command {
 			if _, ok := rt.cfg.Contexts[name]; !ok {
 				return &cliError{Code: 2, Msg: fmt.Sprintf("context not found: %s", name)}
 			}
-			rt.cfg.ActiveContext = name
-			if err := saveConfig(rt.cfgFile, rt.cfg); err != nil {
+			targetContext, err := rt.contextWithSecrets(name)
+			if err != nil {
 				return err
 			}
-			return rt.printResult(200, map[string]any{"ok": true, "active_context": name})
+			rt.cfg.ActiveContext = name
+			hydrated := false
+			warning := ""
+			if targetContext.resolvedActorToken() != "" {
+				if resolvedContext, err := rt.hydrateContextFromServer(cmd.Context(), targetContext); err == nil {
+					hydrated = true
+					if resolvedOrgID := asString(resolvedContext["org_id"]); resolvedOrgID != "" {
+						targetContext.OrgID = resolvedOrgID
+					}
+					if resolvedWorkspaceID := asString(resolvedContext["workspace_id"]); resolvedWorkspaceID != "" {
+						targetContext.WorkspaceID = resolvedWorkspaceID
+					}
+				} else {
+					warning = err.Error()
+				}
+			}
+			if err := rt.persistConfig(); err != nil {
+				return err
+			}
+			body := map[string]any{
+				"ok":             true,
+				"active_context": name,
+				"hydrated":       hydrated,
+				"org_id":         targetContext.OrgID,
+				"workspace_id":   targetContext.WorkspaceID,
+			}
+			if warning != "" {
+				body["warning"] = warning
+			}
+			return rt.printResult(200, body)
 		},
 	}
 }
@@ -540,7 +1190,7 @@ func newContextSetCmd(rt *runtime) *cobra.Command {
 			if env != "" {
 				c.Environment = env
 			}
-			if err := saveConfig(rt.cfgFile, rt.cfg); err != nil {
+			if err := rt.persistConfig(); err != nil {
 				return err
 			}
 			return rt.printResult(200, map[string]any{"ok": true, "context": name})
@@ -668,7 +1318,15 @@ func newIntentsListCmd(rt *runtime) *cobra.Command {
 				return err
 			}
 			if status >= 400 {
-				return &cliError{Code: 1, Msg: "failed to list inbox threads"}
+				detail := asString(body["detail"])
+				if detail == "" {
+					errorBody := asMap(body["error"])
+					detail = asString(errorBody["message"])
+				}
+				if strings.TrimSpace(detail) == "" {
+					return &cliError{Code: 1, Msg: "failed to list inbox threads"}
+				}
+				return &cliError{Code: 1, Msg: fmt.Sprintf("failed to list inbox threads: %s", detail)}
 			}
 			threads := asSlice(body["threads"])
 			rows := make([]intentRow, 0, len(threads))
@@ -1087,7 +1745,11 @@ func newAgentsResolveCmd(rt *runtime) *cobra.Command {
 }
 
 func newKeysCmd(rt *runtime) *cobra.Command {
-	cmd := &cobra.Command{Use: "keys", Short: "Service-account keys operations"}
+	cmd := &cobra.Command{
+		Use:   "keys",
+		Short: "Legacy alias for service-account key operations",
+		Long:  "Legacy alias for `axme service-accounts ...`. Prefer `axme service-accounts list` and `axme service-accounts keys ...` for the guided account-level flow.",
+	}
 	cmd.AddCommand(newKeysListCmd(rt), newKeysCreateCmd(rt), newKeysRevokeCmd(rt))
 	return cmd
 }
@@ -1114,35 +1776,82 @@ func newServiceAccountsListCmd(rt *runtime) *cobra.Command {
 		Use:   "list",
 		Short: "List service accounts or fetch one",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := rt.effectiveContext()
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
 			if serviceAccountID != "" {
-				status, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/service-accounts/"+serviceAccountID, nil, nil, true)
+				status, body, raw, err := rt.request(cmd.Context(), ctx, "GET", "/v1/service-accounts/"+serviceAccountID, nil, nil, true)
 				if err != nil {
 					return err
 				}
-				return rt.printResult(status, body)
+				if status >= 400 {
+					return rt.serviceAccountsAPIError(status, body, raw)
+				}
+				serviceAccount := asMap(body["service_account"])
+				return rt.printGeneric(map[string]any{
+					"ok":              true,
+					"service_account": serviceAccount,
+					"scope": serviceAccountScopeSummary(
+						asString(serviceAccount["org_id"]),
+						asString(serviceAccount["workspace_id"]),
+					),
+				})
 			}
 
-			resolvedOrgID := strings.TrimSpace(orgID)
-			if resolvedOrgID == "" {
-				resolvedOrgID = strings.TrimSpace(ctx.OrgID)
-			}
-			if resolvedOrgID == "" {
-				return &cliError{Code: 2, Msg: "org_id is required to list service accounts"}
-			}
-			resolvedWorkspaceID := strings.TrimSpace(workspaceID)
-			if resolvedWorkspaceID == "" {
-				resolvedWorkspaceID = strings.TrimSpace(ctx.WorkspaceID)
+			resolvedOrgID, resolvedWorkspaceID, err := rt.resolveServiceAccountListContext(
+				cmd.Context(),
+				ctx,
+				strings.TrimSpace(orgID),
+				strings.TrimSpace(workspaceID),
+			)
+			if err != nil {
+				return err
 			}
 			query := map[string]string{"org_id": resolvedOrgID}
 			if resolvedWorkspaceID != "" {
 				query["workspace_id"] = resolvedWorkspaceID
 			}
-			status, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/service-accounts", query, nil, true)
+			status, body, raw, err := rt.request(cmd.Context(), ctx, "GET", "/v1/service-accounts", query, nil, true)
 			if err != nil {
 				return err
 			}
-			return rt.printResult(status, body)
+			if status >= 400 {
+				return rt.serviceAccountsAPIError(status, body, raw)
+			}
+			serviceAccounts := asSlice(body["service_accounts"])
+			scope := serviceAccountScopeSummary(resolvedOrgID, resolvedWorkspaceID)
+			if rt.outputJSON {
+				return rt.printJSON(map[string]any{
+					"ok":               true,
+					"org_id":           resolvedOrgID,
+					"workspace_id":     resolvedWorkspaceID,
+					"scope":            scope,
+					"service_accounts": serviceAccounts,
+				})
+			}
+			rows := make([]map[string]any, 0, len(serviceAccounts))
+			for _, item := range serviceAccounts {
+				account := asMap(item)
+				rows = append(rows, map[string]any{
+					"service_account_id":  asString(account["service_account_id"]),
+					"name":                asString(account["name"]),
+					"workspace_id":        asString(account["workspace_id"]),
+					"status":              asString(account["status"]),
+					"created_by_actor_id": asString(account["created_by_actor_id"]),
+					"created_at":          asString(account["created_at"]),
+				})
+			}
+			printTable(
+				[]string{"SERVICE_ACCOUNT_ID", "NAME", "WORKSPACE_ID", "STATUS", "CREATED_BY", "CREATED_AT"},
+				rows,
+				[]string{"service_account_id", "name", "workspace_id", "status", "created_by_actor_id", "created_at"},
+			)
+			if message := serviceAccountListGuidance(ctx, resolvedOrgID, resolvedWorkspaceID); message != "" {
+				fmt.Println()
+				fmt.Println(message)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&serviceAccountID, "service-account-id", "", "specific service account id")
@@ -1156,47 +1865,60 @@ func newServiceAccountsCreateCmd(rt *runtime) *cobra.Command {
 	var workspaceID string
 	var name string
 	var description string
-	var createdBy string
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create service account",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := rt.effectiveContext()
-			resolvedOrgID := strings.TrimSpace(orgID)
-			if resolvedOrgID == "" {
-				resolvedOrgID = strings.TrimSpace(ctx.OrgID)
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
 			}
-			resolvedWorkspaceID := strings.TrimSpace(workspaceID)
-			if resolvedWorkspaceID == "" {
-				resolvedWorkspaceID = strings.TrimSpace(ctx.WorkspaceID)
+			resolvedOrgID, resolvedWorkspaceID, err := rt.resolveEnterpriseWorkspaceContext(
+				cmd.Context(),
+				ctx,
+				strings.TrimSpace(orgID),
+				strings.TrimSpace(workspaceID),
+			)
+			if err != nil {
+				return err
 			}
-			if resolvedOrgID == "" || resolvedWorkspaceID == "" {
-				return &cliError{Code: 2, Msg: "org_id and workspace_id are required (flags or active context)"}
-			}
-			if strings.TrimSpace(name) == "" || strings.TrimSpace(createdBy) == "" {
-				return &cliError{Code: 2, Msg: "--name and --created-by-actor-id are required"}
+			if strings.TrimSpace(name) == "" {
+				return &cliError{Code: 2, Msg: "--name is required"}
 			}
 			payload := map[string]any{
-				"org_id":              resolvedOrgID,
-				"workspace_id":        resolvedWorkspaceID,
-				"name":                strings.TrimSpace(name),
-				"created_by_actor_id": strings.TrimSpace(createdBy),
+				"org_id":       resolvedOrgID,
+				"workspace_id": resolvedWorkspaceID,
+				"name":         strings.TrimSpace(name),
 			}
 			if strings.TrimSpace(description) != "" {
 				payload["description"] = strings.TrimSpace(description)
 			}
-			status, body, _, err := rt.request(cmd.Context(), ctx, "POST", "/v1/service-accounts", nil, payload, true)
+			status, body, raw, err := rt.request(cmd.Context(), ctx, "POST", "/v1/service-accounts", nil, payload, true)
 			if err != nil {
 				return err
 			}
-			return rt.printResult(status, body)
+			if status >= 400 {
+				return rt.serviceAccountsAPIError(status, body, raw)
+			}
+			serviceAccount := asMap(body["service_account"])
+			return rt.printGeneric(map[string]any{
+				"ok":              true,
+				"org_id":          resolvedOrgID,
+				"workspace_id":    resolvedWorkspaceID,
+				"scope":           serviceAccountScopeSummary(resolvedOrgID, resolvedWorkspaceID),
+				"service_account": serviceAccount,
+				"guidance_message": fmt.Sprintf(
+					"Service account created for workspace %s. Run `axme service-accounts keys create --service-account-id %s` to mint a key.",
+					resolvedWorkspaceID,
+					asString(serviceAccount["service_account_id"]),
+				),
+			})
 		},
 	}
 	cmd.Flags().StringVar(&orgID, "org-id", "", "organization id (defaults to context org_id)")
 	cmd.Flags().StringVar(&workspaceID, "workspace-id", "", "workspace id (defaults to context workspace_id)")
 	cmd.Flags().StringVar(&name, "name", "", "service account name")
 	cmd.Flags().StringVar(&description, "description", "", "service account description")
-	cmd.Flags().StringVar(&createdBy, "created-by-actor-id", "", "actor id creating service account")
 	return cmd
 }
 
@@ -1210,27 +1932,38 @@ func newServiceAccountKeysCmd(rt *runtime) *cobra.Command {
 }
 
 func newServiceAccountKeysCreateCmd(rt *runtime) *cobra.Command {
-	var serviceAccountID, createdBy, expiresAt string
+	var serviceAccountID, expiresAt string
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create service-account key",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if serviceAccountID == "" || createdBy == "" {
-				return &cliError{Code: 2, Msg: "--service-account-id and --created-by-actor-id are required"}
+			if serviceAccountID == "" {
+				return &cliError{Code: 2, Msg: "--service-account-id is required"}
 			}
-			payload := map[string]any{"created_by_actor_id": createdBy}
-			if expiresAt != "" {
-				payload["expires_at"] = expiresAt
-			}
-			status, body, _, err := rt.request(cmd.Context(), rt.effectiveContext(), "POST", "/v1/service-accounts/"+serviceAccountID+"/keys", nil, payload, true)
+			ctx, err := rt.effectiveContextWithSecrets()
 			if err != nil {
 				return err
 			}
-			return rt.printResult(status, body)
+			payload := map[string]any{}
+			if expiresAt != "" {
+				payload["expires_at"] = expiresAt
+			}
+			status, body, raw, err := rt.request(cmd.Context(), ctx, "POST", "/v1/service-accounts/"+serviceAccountID+"/keys", nil, payload, true)
+			if err != nil {
+				return err
+			}
+			if status >= 400 {
+				return rt.serviceAccountsAPIError(status, body, raw)
+			}
+			return rt.printGeneric(map[string]any{
+				"ok":                 true,
+				"service_account_id": serviceAccountID,
+				"key":                asMap(body["key"]),
+				"guidance_message":   "Store this service-account token now. The raw token is only returned at creation time.",
+			})
 		},
 	}
 	cmd.Flags().StringVar(&serviceAccountID, "service-account-id", "", "service account id")
-	cmd.Flags().StringVar(&createdBy, "created-by-actor-id", "", "actor id creating key")
 	cmd.Flags().StringVar(&expiresAt, "expires-at", "", "optional ISO8601 expiration")
 	return cmd
 }
@@ -1244,11 +1977,22 @@ func newServiceAccountKeysRevokeCmd(rt *runtime) *cobra.Command {
 			if serviceAccountID == "" || keyID == "" {
 				return &cliError{Code: 2, Msg: "--service-account-id and --key-id are required"}
 			}
-			status, body, _, err := rt.request(cmd.Context(), rt.effectiveContext(), "POST", "/v1/service-accounts/"+serviceAccountID+"/keys/"+keyID+"/revoke", nil, nil, true)
+			ctx, err := rt.effectiveContextWithSecrets()
 			if err != nil {
 				return err
 			}
-			return rt.printResult(status, body)
+			status, body, raw, err := rt.request(cmd.Context(), ctx, "POST", "/v1/service-accounts/"+serviceAccountID+"/keys/"+keyID+"/revoke", nil, nil, true)
+			if err != nil {
+				return err
+			}
+			if status >= 400 {
+				return rt.serviceAccountsAPIError(status, body, raw)
+			}
+			return rt.printGeneric(map[string]any{
+				"ok":                 true,
+				"service_account_id": serviceAccountID,
+				"key":                asMap(body["key"]),
+			})
 		},
 	}
 	cmd.Flags().StringVar(&serviceAccountID, "service-account-id", "", "service account id")
@@ -1257,43 +2001,23 @@ func newServiceAccountKeysRevokeCmd(rt *runtime) *cobra.Command {
 }
 
 func newKeysListCmd(rt *runtime) *cobra.Command {
-	var serviceAccountID string
-	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List service-account keys (or service accounts)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := rt.effectiveContext()
-			if serviceAccountID != "" {
-				status, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/service-accounts/"+serviceAccountID, nil, nil, true)
-				if err != nil {
-					return err
-				}
-				return rt.printResult(status, body)
-			}
-			if ctx.OrgID == "" {
-				return &cliError{Code: 2, Msg: "org_id is required to list service accounts (or pass --service-account-id)"}
-			}
-			query := map[string]string{"org_id": ctx.OrgID}
-			if ctx.WorkspaceID != "" {
-				query["workspace_id"] = ctx.WorkspaceID
-			}
-			status, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/service-accounts", query, nil, true)
-			if err != nil {
-				return err
-			}
-			return rt.printResult(status, body)
-		},
-	}
-	cmd.Flags().StringVar(&serviceAccountID, "service-account-id", "", "specific service account id")
+	cmd := newServiceAccountsListCmd(rt)
+	cmd.Use = "list"
+	cmd.Short = "Legacy alias for `axme service-accounts list`"
+	cmd.Long = "Legacy alias for `axme service-accounts list`. This keeps compatibility while using the same guided account-level service-account flow."
 	return cmd
 }
 
 func newKeysCreateCmd(rt *runtime) *cobra.Command {
-	return newServiceAccountKeysCreateCmd(rt)
+	cmd := newServiceAccountKeysCreateCmd(rt)
+	cmd.Short = "Legacy alias for `axme service-accounts keys create`"
+	return cmd
 }
 
 func newKeysRevokeCmd(rt *runtime) *cobra.Command {
-	return newServiceAccountKeysRevokeCmd(rt)
+	cmd := newServiceAccountKeysRevokeCmd(rt)
+	cmd.Short = "Legacy alias for `axme service-accounts keys revoke`"
+	return cmd
 }
 
 func newStatusCmd(rt *runtime) *cobra.Command {
@@ -1316,14 +2040,11 @@ func newDoctorCmd(rt *runtime) *cobra.Command {
 		Use:   "doctor",
 		Short: "Configuration and API diagnostics",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := rt.effectiveContext()
-			checks := []map[string]any{
-				{"check": "config_file", "ok": fileExists(rt.cfgFile), "detail": rt.cfgFile},
-				{"check": "base_url", "ok": ctx.BaseURL != "", "detail": ctx.BaseURL},
-				{"check": "api_key_or_actor", "ok": ctx.APIKey != "" || ctx.resolvedActorToken() != "", "detail": "credentials present"},
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
 			}
-			_, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/health", nil, nil, true)
-			checks = append(checks, map[string]any{"check": "health_endpoint", "ok": err == nil, "detail": body})
+			checks := rt.doctorChecks(cmd.Context(), ctx)
 			if rt.outputJSON {
 				return rt.printJSON(checks)
 			}
@@ -1331,6 +2052,127 @@ func newDoctorCmd(rt *runtime) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func (rt *runtime) doctorChecks(ctx context.Context, c *clientConfig) []map[string]any {
+	secretStorageDetail := "not configured"
+	if rt.secretStore != nil {
+		secretStorageDetail = fmt.Sprintf("%s (%s)", rt.secretStore.Mode(), rt.secretStore.Detail())
+	}
+	checks := []map[string]any{
+		{"check": "config_file", "ok": fileExists(rt.cfgFile), "detail": rt.cfgFile},
+		{"check": "base_url", "ok": c.BaseURL != "", "detail": c.BaseURL},
+		{"check": "api_key_or_actor", "ok": c.APIKey != "" || c.resolvedActorToken() != "", "detail": "credentials present"},
+		{"check": "secret_storage", "ok": rt.secretStore != nil, "detail": secretStorageDetail},
+	}
+	if warning := secretStorageFallbackWarning(rt.secretStore); warning != "" {
+		checks = append(checks, map[string]any{
+			"check":  "secret_storage_fallback",
+			"ok":     false,
+			"detail": warning,
+		})
+	}
+	_, body, _, err := rt.request(ctx, c, "GET", "/health", nil, nil, true)
+	checks = append(checks, map[string]any{"check": "health_endpoint", "ok": err == nil, "detail": body})
+
+	if c.resolvedActorToken() == "" {
+		msg := personalContextRequirementMessage("")
+		checks = append(checks,
+			map[string]any{"check": "account_session", "ok": false, "detail": msg},
+			map[string]any{"check": "personal_context", "ok": false, "detail": msg},
+		)
+		return checks
+	}
+
+	checks = append(checks, map[string]any{
+		"check":  "account_session",
+		"ok":     true,
+		"detail": "account session token loaded",
+	})
+	sessions, err := rt.listAccountSessions(ctx, c, false)
+	if err != nil {
+		checks = append(checks, map[string]any{
+			"check":  "account_session_inventory",
+			"ok":     false,
+			"detail": err.Error(),
+		})
+	} else {
+		summary := accountSessionSummary(sessions, false)
+		check := map[string]any{
+			"check":         "account_session_inventory",
+			"ok":            asBool(summary["has_current_session"]),
+			"detail":        asString(summary["guidance_message"]),
+			"active_count":  summary["active_count"],
+			"revoked_count": summary["revoked_count"],
+		}
+		if currentSessionID := asString(summary["current_session_id"]); currentSessionID != "" {
+			check["current_session_id"] = currentSessionID
+		}
+		if asString(check["detail"]) == "" {
+			check["detail"] = fmt.Sprintf("%v active account sessions visible", summary["active_count"])
+		}
+		checks = append(checks, check)
+	}
+	personalContext, err := rt.personalContextFromServer(ctx, c)
+	if err != nil {
+		checks = append(checks, map[string]any{
+			"check":  "personal_context",
+			"ok":     false,
+			"detail": err.Error(),
+		})
+		return checks
+	}
+
+	serverContext := asMap(personalContext["context"])
+	selectedWorkspace := asMap(personalContext["selected_workspace"])
+	guidance := asMap(personalContext["guidance"])
+	membershipCount := len(asSlice(personalContext["workspaces"]))
+	personalContextDetail := fmt.Sprintf("server returned %d visible workspaces", membershipCount)
+	if count, ok := guidance["workspace_count"]; ok {
+		personalContextDetail = fmt.Sprintf("server returned %v visible workspaces", count)
+	}
+	checks = append(checks, map[string]any{
+		"check":  "personal_context",
+		"ok":     true,
+		"detail": personalContextDetail,
+	})
+	selectedWorkspaceID := asString(selectedWorkspace["workspace_id"])
+	checks = append(checks, map[string]any{
+		"check":  "server_selected_workspace",
+		"ok":     selectedWorkspaceID != "",
+		"detail": selectedWorkspaceID,
+	})
+
+	serverOrgID := asString(serverContext["org_id"])
+	serverWorkspaceID := asString(serverContext["workspace_id"])
+	cacheAligned := c.OrgID == serverOrgID && c.WorkspaceID == serverWorkspaceID
+	cacheDetail := "local cache matches server selection"
+	if !cacheAligned {
+		cacheDetail = fmt.Sprintf(
+			"local cache org=%q workspace=%q differs from server org=%q workspace=%q",
+			c.OrgID,
+			c.WorkspaceID,
+			serverOrgID,
+			serverWorkspaceID,
+		)
+	}
+	checks = append(checks, map[string]any{
+		"check":  "workspace_cache_alignment",
+		"ok":     cacheAligned,
+		"detail": cacheDetail,
+	})
+	return checks
+}
+
+func secretStorageFallbackWarning(store secretStore) string {
+	if store == nil || store.Mode() != "file" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Warning: %s=file enables explicit file-based secret fallback at %s. Secrets stay out of config.json but are not stored in OS keyring storage; use this only in headless or CI environments.",
+		axmeCLISecretStorageEnv,
+		store.Detail(),
+	)
 }
 
 func newVersionCmd(rt *runtime) *cobra.Command {
@@ -1532,13 +2374,675 @@ func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path st
 	return resp.StatusCode, out, rawStr, nil
 }
 
-func (rt *runtime) hydrateContextFromServer(ctx context.Context, c *clientConfig) (map[string]any, error) {
+func personalContextRequirementMessage(detail string) string {
+	if strings.TrimSpace(detail) == "" {
+		return "This command requires an account session. Run `axme login` to sign in, then try again."
+	}
+	return fmt.Sprintf(
+		"This command requires an account session. Run `axme login` to sign in, then try again. Server detail: %s",
+		detail,
+	)
+}
+
+func (rt *runtime) personalContextFromServer(ctx context.Context, c *clientConfig) (map[string]any, error) {
 	status, body, raw, err := rt.request(ctx, c, "GET", "/v1/portal/personal/context", nil, nil, true)
 	if err != nil {
 		return nil, err
 	}
 	if status >= 400 {
-		return nil, fmt.Errorf("context resolution returned %d: %s", status, raw)
+		errorBody := asMap(body["error"])
+		errorCode := asString(errorBody["code"])
+		errorMessage := asString(errorBody["message"])
+		detail := asString(body["detail"])
+		if detail == "" {
+			detail = errorMessage
+		}
+		switch {
+		case status == 401 && errorCode == "missing_actor_token":
+			return nil, &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
+		case status == 401 && errorCode == "invalid_actor_token":
+			return nil, &cliError{Code: 2, Msg: "Your account session token is invalid or expired. Run `axme login` to refresh it."}
+		case status == 403 && (errorCode == "invalid_actor_scope" || strings.Contains(strings.ToLower(detail), "actor identity")):
+			return nil, &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
+		case status == 404 && strings.Contains(strings.ToLower(detail), "not bound to an organization/workspace context"):
+			return nil, &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
+		}
+		return nil, fmt.Errorf("personal context returned %d: %s", status, raw)
+	}
+	return body, nil
+}
+
+func personalContextSummary(body map[string]any) map[string]any {
+	summary := map[string]any{
+		"server_context":        asMap(body["context"]),
+		"selected_organization": asMap(body["selected_organization"]),
+		"selected_workspace":    asMap(body["selected_workspace"]),
+		"server_guidance":       asMap(body["guidance"]),
+		"membership_count":      len(asSlice(body["workspaces"])),
+		"organization_count":    len(asSlice(body["organizations"])),
+	}
+	if message := personalContextGuidanceMessage(body); message != "" {
+		summary["guidance_message"] = message
+	}
+	return summary
+}
+
+func personalContextGuidanceMessage(body map[string]any) string {
+	selectedWorkspace := asMap(body["selected_workspace"])
+	selectedWorkspaceID := asString(selectedWorkspace["workspace_id"])
+	selectedWorkspaceName := asString(selectedWorkspace["name"])
+	if selectedWorkspaceName == "" {
+		selectedWorkspaceName = selectedWorkspaceID
+	}
+	selectedOrg := asMap(body["selected_organization"])
+	selectedOrgID := asString(selectedOrg["org_id"])
+	selectedOrgName := asString(selectedOrg["name"])
+	if selectedOrgName == "" {
+		selectedOrgName = selectedOrgID
+	}
+	workspaceCount := len(asSlice(body["workspaces"]))
+	switch {
+	case workspaceCount > 1 && selectedWorkspaceID != "":
+		return fmt.Sprintf(
+			"Selected workspace: %s. You have %d visible workspaces. Run `axme workspace use <workspace-id>` to switch when needed.",
+			selectedWorkspaceName,
+			workspaceCount,
+		)
+	case workspaceCount > 1:
+		return fmt.Sprintf(
+			"You have %d visible workspaces and no server-selected workspace yet. Run `axme workspace use <workspace-id>` to choose one.",
+			workspaceCount,
+		)
+	case workspaceCount == 1 && selectedWorkspaceID != "":
+		return fmt.Sprintf("Selected workspace: %s.", selectedWorkspaceName)
+	case workspaceCount == 1:
+		return "One workspace is visible in your account membership inventory. Run `axme workspace use <workspace-id>` if you want to pin it as your selected workspace."
+	case selectedOrgID != "":
+		return fmt.Sprintf("Selected organization: %s.", selectedOrgName)
+	default:
+		return ""
+	}
+}
+
+func accountSessionSummary(sessions []map[string]any, includeRevoked bool) map[string]any {
+	summary := map[string]any{
+		"session_count":       len(sessions),
+		"active_count":        0,
+		"revoked_count":       0,
+		"include_revoked":     includeRevoked,
+		"has_current_session": false,
+	}
+	currentSession := map[string]any{}
+	activeCount := 0
+	revokedCount := 0
+	for _, session := range sessions {
+		revoked := asBool(session["revoked"]) || strings.TrimSpace(asString(session["revoked_at"])) != ""
+		if revoked {
+			revokedCount++
+		} else {
+			activeCount++
+		}
+		if len(currentSession) == 0 && asBool(session["is_current"]) {
+			currentSession = session
+		}
+	}
+	summary["active_count"] = activeCount
+	summary["revoked_count"] = revokedCount
+	if len(currentSession) > 0 {
+		summary["has_current_session"] = true
+		summary["current_session_id"] = asString(currentSession["session_id"])
+		summary["current_session"] = currentSession
+	}
+	if message := accountSessionGuidanceMessage(sessions, includeRevoked, activeCount, revokedCount, currentSession); message != "" {
+		summary["guidance_message"] = message
+	}
+	return summary
+}
+
+func accountSessionGuidanceMessage(sessions []map[string]any, includeRevoked bool, activeCount, revokedCount int, currentSession map[string]any) string {
+	currentSessionID := asString(currentSession["session_id"])
+	switch {
+	case len(sessions) == 0:
+		return "No account sessions were returned by the server. Run `axme login` to create a new account session."
+	case currentSessionID == "" && activeCount > 0:
+		return "The server returned active account sessions, but none is marked as current for this token. Run `axme login` if this context no longer matches an active session."
+	case currentSessionID != "" && activeCount > 1:
+		return fmt.Sprintf(
+			"Current account session: %s. %d active sessions are still available. Run `axme session revoke <session-id>` to clean up older sessions when needed.",
+			currentSessionID,
+			activeCount,
+		)
+	case currentSessionID != "" && activeCount == 1 && includeRevoked && revokedCount > 0:
+		return fmt.Sprintf(
+			"Current account session: %s. One active session remains and %d revoked sessions are also visible.",
+			currentSessionID,
+			revokedCount,
+		)
+	case currentSessionID != "":
+		return fmt.Sprintf("Current account session: %s.", currentSessionID)
+	case includeRevoked && revokedCount > 0:
+		return fmt.Sprintf("%d revoked account sessions are visible.", revokedCount)
+	default:
+		return ""
+	}
+}
+
+func sessionRevokeGuidanceMessage(mode string, revoked bool) string {
+	if !revoked {
+		return "The server did not confirm session revocation. Run `axme session list` and retry."
+	}
+	if mode == "current_session" {
+		return "Current account session revoked on the server. Run `axme logout` to clear the stale local token, or `axme login` to create a fresh account session."
+	}
+	return "Server-side session revoked. Run `axme session list` to confirm the remaining active sessions."
+}
+
+func logoutGuidanceMessage(apiKeyCleared bool, serverResult map[string]any) string {
+	attempted := asBool(serverResult["attempted"])
+	revoked := asBool(serverResult["revoked"])
+	mode := asString(serverResult["mode"])
+	if errText := strings.TrimSpace(asString(serverResult["error"])); errText != "" {
+		if apiKeyCleared {
+			return fmt.Sprintf(
+				"Cleared local account and workspace credentials, but server-side session revocation did not complete. If another environment is still signed in, use `axme session list` or `axme logout --all-sessions` there. Server detail: %s",
+				errText,
+			)
+		}
+		return fmt.Sprintf(
+			"Cleared the local account session token, but server-side session revocation did not complete. Your workspace API key remains available for workspace-scoped commands. If another environment is still signed in, use `axme session list` or `axme logout --all-sessions` there. Server detail: %s",
+			errText,
+		)
+	}
+	if attempted && revoked && mode == "all_sessions" {
+		if apiKeyCleared {
+			return "All server-side account sessions were revoked, and both local credentials were cleared. Run `axme login` before the next account-level command."
+		}
+		return "All server-side account sessions were revoked and the local account session was cleared. The workspace API key remains available for workspace-scoped commands."
+	}
+	if attempted && revoked {
+		if apiKeyCleared {
+			return "Current server-side account session was revoked, and both local credentials were cleared. Run `axme login` before the next account-level command."
+		}
+		return "Current server-side account session was revoked and the local account session was cleared. The workspace API key remains available for workspace-scoped commands."
+	}
+	if !attempted {
+		if apiKeyCleared {
+			return "No local account session token was loaded. Cleared the local workspace API key too."
+		}
+		return "No local account session token was loaded. Cleared local account-session state only; the workspace API key remains available."
+	}
+	if apiKeyCleared {
+		return "Cleared both local credentials. Run `axme login` before the next account-level command."
+	}
+	return "Cleared the local account session token. The workspace API key remains available for workspace-scoped commands."
+}
+
+func organizationContextRequirementMessage(detail string) string {
+	base := "Organization context is required. Use `axme workspace use`, `axme org list`, pass `--org-id`, or set an active org in your context."
+	if strings.TrimSpace(detail) == "" {
+		return base
+	}
+	return fmt.Sprintf("%s %s", base, detail)
+}
+
+func workspaceContextRequirementMessage(detail string) string {
+	base := "Workspace context is required. Use `axme workspace use`, `axme workspace list`, pass `--workspace-id`, or set an active workspace in your context."
+	if strings.TrimSpace(detail) == "" {
+		return base
+	}
+	return fmt.Sprintf("%s %s", base, detail)
+}
+
+func memberScopeSummary(orgID string, workspaceID string) map[string]any {
+	scope := "organization"
+	description := "organization-wide member operation"
+	if strings.TrimSpace(workspaceID) != "" {
+		scope = "workspace"
+		description = "workspace-scoped member operation"
+	}
+	return map[string]any{
+		"scope":        scope,
+		"description":  description,
+		"org_id":       orgID,
+		"workspace_id": workspaceID,
+	}
+}
+
+func memberListGuidance(c *clientConfig, orgID string, workspaceID string) string {
+	if strings.TrimSpace(workspaceID) != "" {
+		return fmt.Sprintf("Listing workspace-scoped members for workspace %s in org %s.", workspaceID, orgID)
+	}
+	if c != nil && strings.TrimSpace(c.WorkspaceID) != "" {
+		return fmt.Sprintf(
+			"Listing organization-wide members for org %s. Current selected workspace is %s. Pass `--workspace-id %s` to narrow the view.",
+			orgID,
+			c.WorkspaceID,
+			c.WorkspaceID,
+		)
+	}
+	return fmt.Sprintf("Listing organization-wide members for org %s. Pass `--workspace-id <workspace-id>` to narrow the view.", orgID)
+}
+
+func serviceAccountScopeSummary(orgID string, workspaceID string) map[string]any {
+	scope := "organization"
+	description := "organization-wide service-account operation"
+	if strings.TrimSpace(workspaceID) != "" {
+		scope = "workspace"
+		description = "workspace-scoped service-account operation"
+	}
+	return map[string]any{
+		"scope":        scope,
+		"description":  description,
+		"org_id":       orgID,
+		"workspace_id": workspaceID,
+	}
+}
+
+func serviceAccountListGuidance(c *clientConfig, orgID string, workspaceID string) string {
+	if strings.TrimSpace(workspaceID) != "" {
+		return fmt.Sprintf("Listing service accounts for workspace %s in org %s.", workspaceID, orgID)
+	}
+	if c != nil && strings.TrimSpace(c.WorkspaceID) != "" {
+		return fmt.Sprintf(
+			"Listing organization-wide service accounts for org %s. Current selected workspace is %s. Pass `--workspace-id %s` to narrow the view.",
+			orgID,
+			c.WorkspaceID,
+			c.WorkspaceID,
+		)
+	}
+	return fmt.Sprintf("Listing organization-wide service accounts for org %s. Pass `--workspace-id <workspace-id>` to narrow the view.", orgID)
+}
+
+func serviceAccountAdminRequirementMessage(detail string) string {
+	base := "This command requires an account session with organization or workspace admin access, plus a valid workspace or platform API key. Run `axme login`, select the right workspace, and try again."
+	if strings.TrimSpace(detail) == "" {
+		return base
+	}
+	return fmt.Sprintf("%s Server detail: %s", base, detail)
+}
+
+func serviceAccountPlatformAPIKeyRequirementMessage(detail string) string {
+	base := "This command requires a workspace or platform API key in the active context. Set the right API key or select the right workspace context, then try again."
+	if strings.TrimSpace(detail) == "" {
+		return base
+	}
+	return fmt.Sprintf("%s Server detail: %s", base, detail)
+}
+
+func (rt *runtime) resolveServiceAccountListContext(ctx context.Context, c *clientConfig, overrideOrgID, overrideWorkspaceID string) (string, string, error) {
+	orgID := strings.TrimSpace(overrideOrgID)
+	if orgID == "" {
+		orgID = strings.TrimSpace(c.OrgID)
+	}
+	workspaceID := strings.TrimSpace(overrideWorkspaceID)
+	if workspaceID == "" {
+		workspaceID = strings.TrimSpace(c.WorkspaceID)
+	}
+	if orgID != "" && workspaceID != "" {
+		return orgID, workspaceID, nil
+	}
+	if strings.TrimSpace(c.resolvedActorToken()) == "" {
+		if orgID == "" {
+			return "", "", &cliError{Code: 2, Msg: organizationContextRequirementMessage("")}
+		}
+		return orgID, workspaceID, nil
+	}
+	body, err := rt.personalContextFromServer(ctx, c)
+	if err != nil {
+		return "", "", err
+	}
+	serverContext := asMap(body["context"])
+	if orgID == "" {
+		orgID = strings.TrimSpace(asString(serverContext["org_id"]))
+	}
+	if workspaceID == "" {
+		workspaceID = strings.TrimSpace(asString(serverContext["workspace_id"]))
+	}
+	if orgID == "" {
+		return "", "", &cliError{Code: 2, Msg: organizationContextRequirementMessage(personalContextGuidanceMessage(body))}
+	}
+	return orgID, workspaceID, nil
+}
+
+func (rt *runtime) resolveEnterpriseOrganizationContext(ctx context.Context, c *clientConfig, overrideOrgID string) (string, error) {
+	if orgID := strings.TrimSpace(overrideOrgID); orgID != "" {
+		return orgID, nil
+	}
+	if orgID := strings.TrimSpace(c.OrgID); orgID != "" {
+		return orgID, nil
+	}
+	if strings.TrimSpace(c.resolvedActorToken()) == "" {
+		return "", &cliError{Code: 2, Msg: organizationContextRequirementMessage("")}
+	}
+	body, err := rt.personalContextFromServer(ctx, c)
+	if err != nil {
+		return "", err
+	}
+	serverContext := asMap(body["context"])
+	if orgID := strings.TrimSpace(asString(serverContext["org_id"])); orgID != "" {
+		return orgID, nil
+	}
+	return "", &cliError{Code: 2, Msg: organizationContextRequirementMessage(personalContextGuidanceMessage(body))}
+}
+
+func (rt *runtime) resolveEnterpriseWorkspaceContext(ctx context.Context, c *clientConfig, overrideOrgID, overrideWorkspaceID string) (string, string, error) {
+	orgID := strings.TrimSpace(overrideOrgID)
+	if orgID == "" {
+		orgID = strings.TrimSpace(c.OrgID)
+	}
+	workspaceID := strings.TrimSpace(overrideWorkspaceID)
+	if workspaceID == "" {
+		workspaceID = strings.TrimSpace(c.WorkspaceID)
+	}
+	if orgID != "" && workspaceID != "" {
+		return orgID, workspaceID, nil
+	}
+	if strings.TrimSpace(c.resolvedActorToken()) == "" {
+		if orgID == "" {
+			return "", "", &cliError{Code: 2, Msg: organizationContextRequirementMessage("")}
+		}
+		return "", "", &cliError{Code: 2, Msg: workspaceContextRequirementMessage("")}
+	}
+	body, err := rt.personalContextFromServer(ctx, c)
+	if err != nil {
+		return "", "", err
+	}
+	serverContext := asMap(body["context"])
+	if orgID == "" {
+		orgID = strings.TrimSpace(asString(serverContext["org_id"]))
+	}
+	if workspaceID == "" {
+		workspaceID = strings.TrimSpace(asString(serverContext["workspace_id"]))
+	}
+	if orgID == "" {
+		return "", "", &cliError{Code: 2, Msg: organizationContextRequirementMessage(personalContextGuidanceMessage(body))}
+	}
+	if workspaceID == "" {
+		return "", "", &cliError{Code: 2, Msg: workspaceContextRequirementMessage(personalContextGuidanceMessage(body))}
+	}
+	return orgID, workspaceID, nil
+}
+
+func (rt *runtime) personalWorkspaceSelectionAPIError(status int, body map[string]any, raw string) error {
+	errorBody := asMap(body["error"])
+	errorCode := asString(errorBody["code"])
+	errorMessage := asString(errorBody["message"])
+	detail := asString(body["detail"])
+	if detail == "" {
+		detail = errorMessage
+	}
+	switch {
+	case status == 401 && errorCode == "missing_actor_token":
+		return &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
+	case status == 401 && errorCode == "invalid_actor_token":
+		return &cliError{Code: 2, Msg: "Your account session token is invalid or expired. Run `axme login` to refresh it."}
+	case status == 403 && strings.Contains(strings.ToLower(detail), "outside actor membership scope"):
+		return &cliError{Code: 2, Msg: "That workspace is not part of your account membership inventory. Run `axme workspace list` to see available workspaces, then try again."}
+	case status == 403 && (errorCode == "invalid_actor_scope" || strings.Contains(strings.ToLower(detail), "actor identity")):
+		return &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
+	}
+	return fmt.Errorf("workspace selection returned %d: %s", status, raw)
+}
+
+func enterpriseMemberRequirementMessage(detail string) string {
+	if strings.TrimSpace(detail) == "" {
+		return "This command requires an account session with organization or workspace admin access. Run `axme login`, select the right workspace, and try again."
+	}
+	return fmt.Sprintf(
+		"This command requires an account session with organization or workspace admin access. Run `axme login`, select the right workspace, and try again. Server detail: %s",
+		detail,
+	)
+}
+
+func enterpriseMemberScopeMessage(detail string) string {
+	base := "That organization or workspace is outside your account membership inventory. Run `axme workspace list` to confirm the selected workspace, then retry with the right `--org-id` or `--workspace-id`."
+	if strings.TrimSpace(detail) == "" {
+		return base
+	}
+	return fmt.Sprintf("%s Server detail: %s", base, detail)
+}
+
+func (rt *runtime) enterpriseMembersAPIError(status int, body map[string]any, raw string) error {
+	errorBody := asMap(body["error"])
+	errorCode := asString(errorBody["code"])
+	errorMessage := asString(errorBody["message"])
+	detail := asString(body["detail"])
+	if detail == "" {
+		detail = errorMessage
+	}
+	switch {
+	case status == 401 && errorCode == "missing_actor_token":
+		return &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
+	case status == 401 && errorCode == "invalid_actor_token":
+		return &cliError{Code: 2, Msg: "Your account session token is invalid or expired. Run `axme login` to refresh it."}
+	case status == 403 && (strings.Contains(strings.ToLower(detail), "outside actor membership scope") ||
+		strings.Contains(strings.ToLower(detail), "workspace_id does not match target workspace_id") ||
+		strings.Contains(strings.ToLower(detail), "membership scope")):
+		return &cliError{Code: 2, Msg: enterpriseMemberScopeMessage(detail)}
+	case status == 403:
+		return &cliError{Code: 2, Msg: enterpriseMemberRequirementMessage(detail)}
+	case status == 404 && strings.TrimSpace(detail) != "":
+		return &cliError{Code: 2, Msg: detail}
+	case status == 422 && strings.TrimSpace(detail) != "":
+		return &cliError{Code: 2, Msg: detail}
+	default:
+		return fmt.Errorf("enterprise member request returned %d: %s", status, raw)
+	}
+}
+
+func (rt *runtime) serviceAccountsAPIError(status int, body map[string]any, raw string) error {
+	errorBody := asMap(body["error"])
+	errorCode := asString(errorBody["code"])
+	errorMessage := asString(errorBody["message"])
+	detail := asString(body["detail"])
+	if detail == "" {
+		detail = errorMessage
+	}
+	switch {
+	case status == 401 && errorCode == "missing_actor_token":
+		return &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
+	case status == 401 && errorCode == "invalid_actor_token":
+		return &cliError{Code: 2, Msg: "Your account session token is invalid or expired. Run `axme login` to refresh it."}
+	case status == 401 && errorCode == "missing_platform_api_key":
+		return &cliError{Code: 2, Msg: serviceAccountPlatformAPIKeyRequirementMessage(detail)}
+	case status == 403 && (strings.Contains(strings.ToLower(detail), "outside actor membership scope") ||
+		strings.Contains(strings.ToLower(detail), "workspace_id does not match target workspace_id") ||
+		strings.Contains(strings.ToLower(detail), "membership scope")):
+		return &cliError{Code: 2, Msg: enterpriseMemberScopeMessage(detail)}
+	case status == 403:
+		return &cliError{Code: 2, Msg: serviceAccountAdminRequirementMessage(detail)}
+	case status == 404 && strings.TrimSpace(detail) != "":
+		return &cliError{Code: 2, Msg: detail}
+	case status == 422 && strings.TrimSpace(detail) != "":
+		return &cliError{Code: 2, Msg: detail}
+	default:
+		return fmt.Errorf("service account request returned %d: %s", status, raw)
+	}
+}
+
+func (rt *runtime) listEnterpriseMembers(ctx context.Context, c *clientConfig, orgID string, workspaceID string) ([]map[string]any, error) {
+	status, body, raw, err := rt.request(
+		ctx,
+		c,
+		"GET",
+		"/v1/organizations/"+orgID+"/members",
+		map[string]string{"workspace_id": workspaceID},
+		nil,
+		true,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, rt.enterpriseMembersAPIError(status, body, raw)
+	}
+	items := asSlice(body["members"])
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, asMap(item))
+	}
+	return out, nil
+}
+
+func (rt *runtime) addEnterpriseMember(ctx context.Context, c *clientConfig, orgID string, workspaceID string, actorID string, role string) (map[string]any, error) {
+	status, body, raw, err := rt.request(
+		ctx,
+		c,
+		"POST",
+		"/v1/organizations/"+orgID+"/members",
+		nil,
+		map[string]any{
+			"actor_id":     actorID,
+			"role":         role,
+			"workspace_id": workspaceID,
+		},
+		true,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, rt.enterpriseMembersAPIError(status, body, raw)
+	}
+	return asMap(body["member"]), nil
+}
+
+func (rt *runtime) updateEnterpriseMember(ctx context.Context, c *clientConfig, orgID string, memberID string, role string, statusValue string) (map[string]any, error) {
+	payload := map[string]any{}
+	if strings.TrimSpace(role) != "" {
+		payload["role"] = role
+	}
+	if strings.TrimSpace(statusValue) != "" {
+		payload["status"] = statusValue
+	}
+	status, body, raw, err := rt.request(
+		ctx,
+		c,
+		"PATCH",
+		"/v1/organizations/"+orgID+"/members/"+memberID,
+		nil,
+		payload,
+		true,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, rt.enterpriseMembersAPIError(status, body, raw)
+	}
+	return asMap(body["member"]), nil
+}
+
+func (rt *runtime) removeEnterpriseMember(ctx context.Context, c *clientConfig, orgID string, memberID string) (map[string]any, error) {
+	status, body, raw, err := rt.request(
+		ctx,
+		c,
+		"DELETE",
+		"/v1/organizations/"+orgID+"/members/"+memberID,
+		nil,
+		nil,
+		true,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, rt.enterpriseMembersAPIError(status, body, raw)
+	}
+	return asMap(body["result"]), nil
+}
+
+func (rt *runtime) listAccountSessions(ctx context.Context, c *clientConfig, includeRevoked bool) ([]map[string]any, error) {
+	status, body, raw, err := rt.request(
+		ctx,
+		c,
+		"GET",
+		"/v1/auth/sessions",
+		map[string]string{"include_revoked": strconv.FormatBool(includeRevoked)},
+		nil,
+		true,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("list sessions returned %d: %s", status, raw)
+	}
+	items := asSlice(body["sessions"])
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, asMap(item))
+	}
+	return out, nil
+}
+
+func (rt *runtime) revokeAccountSessionByID(ctx context.Context, c *clientConfig, sessionID string) (bool, error) {
+	status, body, raw, err := rt.request(
+		ctx,
+		c,
+		"POST",
+		"/v1/auth/sessions/revoke",
+		nil,
+		map[string]any{"session_id": sessionID},
+		true,
+	)
+	if err != nil {
+		return false, err
+	}
+	if status >= 400 {
+		return false, fmt.Errorf("revoke session returned %d: %s", status, raw)
+	}
+	return asBool(body["revoked"]) || asBool(body["ok"]), nil
+}
+
+func (rt *runtime) revokeCurrentAccountSession(ctx context.Context, c *clientConfig) (string, bool, error) {
+	sessions, err := rt.listAccountSessions(ctx, c, false)
+	if err != nil {
+		return "", false, err
+	}
+	for _, session := range sessions {
+		if !asBool(session["is_current"]) {
+			continue
+		}
+		sessionID := asString(session["session_id"])
+		if sessionID == "" {
+			break
+		}
+		revoked, err := rt.revokeAccountSessionByID(ctx, c, sessionID)
+		if err != nil {
+			return sessionID, false, err
+		}
+		return sessionID, revoked, nil
+	}
+	return "", false, fmt.Errorf("current account session was not found on the server")
+}
+
+func (rt *runtime) logoutAllAccountSessions(ctx context.Context, c *clientConfig) (int, error) {
+	status, body, raw, err := rt.request(
+		ctx,
+		c,
+		"POST",
+		"/v1/auth/logout-all",
+		nil,
+		map[string]any{},
+		true,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if status >= 400 {
+		return status, fmt.Errorf("logout-all returned %d: %s", status, raw)
+	}
+	if !asBool(body["ok"]) {
+		return status, fmt.Errorf("logout-all did not confirm success")
+	}
+	return status, nil
+}
+
+func (rt *runtime) hydrateContextFromServer(ctx context.Context, c *clientConfig) (map[string]any, error) {
+	body, err := rt.personalContextFromServer(ctx, c)
+	if err != nil {
+		return nil, err
 	}
 	resolvedContext := asMap(body["context"])
 	if len(resolvedContext) == 0 {
@@ -1562,8 +3066,103 @@ func (rt *runtime) applyAuthHeaders(req *http.Request, c *clientConfig) {
 	}
 }
 
-func (rt *runtime) effectiveContext() *clientConfig {
-	active := rt.ensureContext(rt.activeContextName())
+func (rt *runtime) loadSecretsIntoContext(name string, c *clientConfig) error {
+	if rt == nil || rt.secretStore == nil || c == nil {
+		return nil
+	}
+	if c.secretsLoaded {
+		return nil
+	}
+	secrets, err := rt.secretStore.Load(name)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.APIKey) == "" {
+		c.APIKey = strings.TrimSpace(secrets.APIKey)
+	}
+	if strings.TrimSpace(c.resolvedActorToken()) == "" {
+		c.setActorToken(strings.TrimSpace(secrets.ActorToken))
+	}
+	c.secretsLoaded = true
+	return nil
+}
+
+func (rt *runtime) contextWithSecrets(name string) (*clientConfig, error) {
+	c := rt.ensureContext(name)
+	if err := rt.loadSecretsIntoContext(name, c); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (rt *runtime) persistConfig() error {
+	if rt == nil || rt.cfg == nil {
+		return nil
+	}
+	if rt.secretStore != nil {
+		for name, c := range rt.cfg.Contexts {
+			if c == nil {
+				continue
+			}
+			secrets := storedContextSecrets{
+				APIKey:     c.APIKey,
+				ActorToken: c.resolvedActorToken(),
+			}
+			if !c.secretsLoaded {
+				existing, err := rt.secretStore.Load(name)
+				if err != nil {
+					return err
+				}
+				if strings.TrimSpace(secrets.APIKey) == "" {
+					secrets.APIKey = existing.APIKey
+				}
+				if strings.TrimSpace(secrets.ActorToken) == "" {
+					secrets.ActorToken = existing.ActorToken
+				}
+			}
+			if err := rt.secretStore.Save(name, secrets); err != nil {
+				return err
+			}
+		}
+	}
+	return saveConfig(rt.cfgFile, rt.cfg)
+}
+
+func (rt *runtime) migratePlaintextSecrets() error {
+	if rt == nil || rt.cfg == nil || rt.secretStore == nil {
+		return nil
+	}
+	var foundPlaintext bool
+	for name, c := range rt.cfg.Contexts {
+		if c == nil {
+			continue
+		}
+		if strings.TrimSpace(c.APIKey) == "" && strings.TrimSpace(c.resolvedActorToken()) == "" {
+			continue
+		}
+		if err := rt.secretStore.Save(name, storedContextSecrets{
+			APIKey:     c.APIKey,
+			ActorToken: c.resolvedActorToken(),
+		}); err != nil {
+			return err
+		}
+		c.APIKey = ""
+		c.ActorToken = ""
+		c.BearerToken = ""
+		c.secretsLoaded = true
+		foundPlaintext = true
+	}
+	if foundPlaintext {
+		return saveConfig(rt.cfgFile, rt.cfg)
+	}
+	return nil
+}
+
+func (rt *runtime) effectiveContextWithSecrets() (*clientConfig, error) {
+	active, err := rt.contextWithSecrets(rt.activeContextName())
+	if err != nil {
+		return nil, err
+	}
 	merged := *active
 	merged.normalizeActorToken()
 	if merged.BaseURL == "" {
@@ -1616,13 +3215,48 @@ func (rt *runtime) effectiveContext() *clientConfig {
 	if rt.overrideEnv != "" {
 		merged.Environment = rt.overrideEnv
 	}
-	return &merged
+	return &merged, nil
+}
+
+func (rt *runtime) effectiveContext() *clientConfig {
+	merged, err := rt.effectiveContextWithSecrets()
+	if err == nil {
+		return merged
+	}
+	active := rt.ensureContext(rt.activeContextName())
+	fallback := *active
+	fallback.normalizeActorToken()
+	return &fallback
+}
+
+func (rt *runtime) applyPersistentContextOverrides(c *clientConfig) {
+	if rt == nil || c == nil {
+		return
+	}
+	if rt.overrideBase != "" {
+		c.BaseURL = strings.TrimRight(rt.overrideBase, "/")
+	}
+	if rt.overrideOrg != "" {
+		c.OrgID = rt.overrideOrg
+	}
+	if rt.overrideWs != "" {
+		c.WorkspaceID = rt.overrideWs
+	}
+	if rt.overrideOwn != "" {
+		c.OwnerAgent = rt.overrideOwn
+	}
+	if rt.overrideEnv != "" {
+		c.Environment = rt.overrideEnv
+	}
 }
 
 func (rt *runtime) ensureContext(name string) *clientConfig {
 	c, ok := rt.cfg.Contexts[name]
 	if ok {
 		c.normalizeActorToken()
+		if err := rt.loadSecretsIntoContext(name, c); err != nil {
+			// Defer the hard failure until a command needs persisted secrets.
+		}
 		return c
 	}
 	c = &clientConfig{BaseURL: defaultLocalAPIBaseURL, Environment: "staging"}
@@ -1801,7 +3435,23 @@ func saveConfig(path string, cfg *appConfig) error {
 			c.normalizeActorToken()
 		}
 	}
-	raw, err := json.MarshalIndent(cfg, "", "  ")
+	sanitized := &appConfig{
+		ActiveContext: cfg.ActiveContext,
+		Contexts:      map[string]*clientConfig{},
+	}
+	for name, c := range cfg.Contexts {
+		if c == nil {
+			continue
+		}
+		sanitized.Contexts[name] = &clientConfig{
+			BaseURL:     c.BaseURL,
+			OwnerAgent:  c.OwnerAgent,
+			OrgID:       c.OrgID,
+			WorkspaceID: c.WorkspaceID,
+			Environment: c.Environment,
+		}
+	}
+	raw, err := json.MarshalIndent(sanitized, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -1942,6 +3592,13 @@ func asString(v any) string {
 		return s
 	}
 	return ""
+}
+
+func asBool(v any) bool {
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	return false
 }
 
 func asStringSlice(v any) []string {

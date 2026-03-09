@@ -10,25 +10,25 @@ import (
 
 const deviceLoginApprovalBase = "https://cloud.axme.ai/app/login/cli"
 
-// runDeviceLogin implements the browser/device login flow:
+// runDeviceLogin implements the default browser-based account sign-in flow:
 //  1. Create a CLI grant on the server → get grant_id + user_code
 //  2. Open browser to approval URL
 //  3. Poll server until approved or expired
 //  4. Store retrieved api_key + context in config
-func (rt *runtime) runDeviceLogin(ctx context.Context, ctxName string) error {
+func (rt *runtime) runDeviceLogin(ctx context.Context, ctxName string, openBrowser bool) error {
 	c := rt.ensureContext(ctxName)
 
 	if !rt.outputJSON {
-		fmt.Fprintln(os.Stderr, "Starting browser login flow...")
+		fmt.Fprintln(os.Stderr, "Starting account sign-in flow...")
 	}
 
 	// Step 1: Create grant
-	status, body, raw, err := rt.request(ctx, c, "POST", "/v1/auth/cli-grants", nil, nil, false)
+	status, body, raw, err := rt.request(ctx, c, "POST", "/v1/auth/cli-grants", nil, nil, true)
 	if err != nil {
-		return fmt.Errorf("device login: could not create grant: %w", err)
+		return fmt.Errorf("account login: could not create grant: %w", err)
 	}
 	if status >= 400 {
-		return fmt.Errorf("device login: grant creation failed (%d): %s", status, raw)
+		return fmt.Errorf("account login: grant creation failed (%d): %s", status, raw)
 	}
 
 	grantID := asString(body["grant_id"])
@@ -59,7 +59,11 @@ func (rt *runtime) runDeviceLogin(ctx context.Context, ctxName string) error {
 			"message":      "open approval_url in browser and complete login there",
 		})
 	} else {
-		fmt.Fprintf(os.Stderr, "\n  Opening browser...\n")
+		if openBrowser {
+			fmt.Fprintf(os.Stderr, "\n  Opening browser...\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "\n  Browser auto-open disabled.\n")
+		}
 		fmt.Fprintf(os.Stderr, "  Approval URL: %s\n\n", approvalURL)
 		fmt.Fprintf(os.Stderr, "  Confirm this code matches what you see in the browser:\n")
 		fmt.Fprintf(os.Stderr, "\n      %s\n\n", userCode)
@@ -67,7 +71,7 @@ func (rt *runtime) runDeviceLogin(ctx context.Context, ctxName string) error {
 	}
 
 	// Open browser
-	if !rt.outputJSON {
+	if !rt.outputJSON && openBrowser {
 		if err := openURLInBrowser(approvalURL); err != nil {
 			fmt.Fprintf(os.Stderr, "  (could not open browser automatically: %v)\n", err)
 			fmt.Fprintf(os.Stderr, "  Please open the URL manually.\n")
@@ -85,10 +89,10 @@ func (rt *runtime) runDeviceLogin(ctx context.Context, ctxName string) error {
 			return ctx.Err()
 		case <-ticker.C:
 			if time.Now().After(deadline) {
-				return fmt.Errorf("device login: timed out waiting for browser approval")
+				return fmt.Errorf("account login: timed out waiting for browser approval")
 			}
 
-			pollStatus, pollBody, pollRaw, pollErr := rt.request(ctx, c, "GET", "/v1/auth/cli-grants/"+grantID, nil, nil, false)
+			pollStatus, pollBody, pollRaw, pollErr := rt.request(ctx, c, "GET", "/v1/auth/cli-grants/"+grantID, nil, nil, true)
 			if pollErr != nil {
 				if !rt.outputJSON {
 					fmt.Fprint(os.Stderr, ".")
@@ -97,10 +101,10 @@ func (rt *runtime) runDeviceLogin(ctx context.Context, ctxName string) error {
 				continue
 			}
 			if pollStatus == 410 {
-				return fmt.Errorf("device login: grant expired before approval")
+				return fmt.Errorf("account login: grant expired before approval")
 			}
 			if pollStatus >= 400 {
-				return fmt.Errorf("device login: poll error (%d): %s", pollStatus, pollRaw)
+				return fmt.Errorf("account login: poll error (%d): %s", pollStatus, pollRaw)
 			}
 
 			state := asString(pollBody["state"])
@@ -111,9 +115,12 @@ func (rt *runtime) runDeviceLogin(ctx context.Context, ctxName string) error {
 				}
 				retrievedKey := asString(pollBody["api_key"])
 				if retrievedKey == "" {
-					return fmt.Errorf("device login: grant approved but no api_key returned")
+					return fmt.Errorf("account login: grant approved but no api_key returned")
 				}
 				c.APIKey = retrievedKey
+				if accountSessionToken := asString(pollBody["account_session_token"]); accountSessionToken != "" {
+					c.setActorToken(accountSessionToken)
+				}
 				if orgID := asString(pollBody["org_id"]); orgID != "" {
 					c.OrgID = orgID
 				}
@@ -135,17 +142,12 @@ func (rt *runtime) runDeviceLogin(ctx context.Context, ctxName string) error {
 				} else {
 					hydrated = true
 				}
-				if err := saveConfig(rt.cfgFile, rt.cfg); err != nil {
+				if err := rt.persistConfig(); err != nil {
 					return err
 				}
+				summary := rt.deviceLoginSummary(ctx, c, ctxName, hydrated)
 				if rt.outputJSON {
-					return rt.printJSON(map[string]any{
-						"ok":           true,
-						"context":      ctxName,
-						"hydrated":     hydrated,
-						"org_id":       c.OrgID,
-						"workspace_id": c.WorkspaceID,
-					})
+					return rt.printJSON(summary)
 				}
 				fmt.Fprintf(os.Stderr, "\n  Login approved. Credentials saved to context %q.\n", ctxName)
 				if c.OrgID != "" {
@@ -154,10 +156,44 @@ func (rt *runtime) runDeviceLogin(ctx context.Context, ctxName string) error {
 				if c.WorkspaceID != "" {
 					fmt.Fprintf(os.Stderr, "  workspace_id: %s\n", c.WorkspaceID)
 				}
+				if c.resolvedActorToken() != "" {
+					fmt.Fprintln(os.Stderr, "  account session: available")
+				}
+				if membershipCount, ok := summary["membership_count"].(int); ok && membershipCount > 0 {
+					fmt.Fprintf(os.Stderr, "  visible workspaces: %d\n", membershipCount)
+				}
+				if organizationsCount, ok := summary["organization_count"].(int); ok && organizationsCount > 0 {
+					fmt.Fprintf(os.Stderr, "  visible organizations: %d\n", organizationsCount)
+				}
+				if selectedOrg := asMap(summary["selected_organization"]); len(selectedOrg) > 0 {
+					selectedOrgLabel := asString(selectedOrg["name"])
+					if selectedOrgLabel == "" {
+						selectedOrgLabel = asString(selectedOrg["org_id"])
+					}
+					if selectedOrgLabel != "" {
+						fmt.Fprintf(os.Stderr, "  selected organization: %s\n", selectedOrgLabel)
+					}
+				}
+				if selectedWorkspace := asMap(summary["selected_workspace"]); len(selectedWorkspace) > 0 {
+					selectedWorkspaceLabel := asString(selectedWorkspace["name"])
+					if selectedWorkspaceLabel == "" {
+						selectedWorkspaceLabel = asString(selectedWorkspace["workspace_id"])
+					}
+					if selectedWorkspaceLabel != "" {
+						fmt.Fprintf(os.Stderr, "  selected workspace: %s\n", selectedWorkspaceLabel)
+					}
+				}
+				if warning := asString(summary["server_context_warning"]); warning != "" {
+					fmt.Fprintf(os.Stderr, "  server context warning: %s\n", warning)
+				}
+				fmt.Fprintln(os.Stderr)
+				fmt.Fprintln(os.Stderr, "  Next commands:")
+				fmt.Fprintln(os.Stderr, "    axme whoami")
+				fmt.Fprintln(os.Stderr, "    axme workspace list")
 				fmt.Fprintln(os.Stderr)
 				return nil
 			case "expired":
-				return fmt.Errorf("device login: grant expired")
+				return fmt.Errorf("account login: grant expired")
 			default:
 				// still pending
 				if !rt.outputJSON {
@@ -167,6 +203,29 @@ func (rt *runtime) runDeviceLogin(ctx context.Context, ctxName string) error {
 			}
 		}
 	}
+}
+
+func (rt *runtime) deviceLoginSummary(ctx context.Context, c *clientConfig, ctxName string, hydrated bool) map[string]any {
+	summary := map[string]any{
+		"ok":                  true,
+		"context":             ctxName,
+		"hydrated":            hydrated,
+		"org_id":              c.OrgID,
+		"workspace_id":        c.WorkspaceID,
+		"has_account_session": c.resolvedActorToken() != "",
+	}
+	if c.resolvedActorToken() == "" {
+		return summary
+	}
+	personalContext, err := rt.personalContextFromServer(ctx, c)
+	if err != nil {
+		summary["server_context_warning"] = err.Error()
+		return summary
+	}
+	for k, v := range personalContextSummary(personalContext) {
+		summary[k] = v
+	}
+	return summary
 }
 
 func asFloat(v any) float64 {

@@ -50,7 +50,18 @@ func newQuotaShowCmd(rt *runtime) *cobra.Command {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			status, body, raw, err := rt.request(ctx, c, "GET", "/v1/portal/enterprise/overview", nil, nil, false)
+			status, body, raw, err := rt.request(
+				ctx,
+				c,
+				"GET",
+				"/v1/portal/enterprise/overview",
+				map[string]string{
+					"org_id":       c.OrgID,
+					"workspace_id": c.WorkspaceID,
+				},
+				nil,
+				false,
+			)
 			if err != nil {
 				return err
 			}
@@ -174,11 +185,11 @@ Valid upgrade tiers:
 			defer cancel()
 
 			payload := map[string]any{
-				"request_type":    "quota_upgrade",
+				"request_type":       "quota_upgrade",
 				"requester_actor_id": c.OwnerAgent,
-				"requested_tier":  tier,
-				"company_name":    company,
-				"justification":   justification,
+				"requested_tier":     tier,
+				"company_name":       company,
+				"justification":      justification,
 			}
 			if c.OrgID != "" {
 				payload["org_id"] = c.OrgID
