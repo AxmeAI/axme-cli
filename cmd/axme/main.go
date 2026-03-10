@@ -1303,45 +1303,53 @@ func newContextCmd(rt *runtime) *cobra.Command {
 				return nil
 			},
 		},
-		&cobra.Command{
-			Use:   "show",
-			Short: "Show active context",
-			RunE: func(cmd *cobra.Command, args []string) error {
-				name := rt.activeContextName()
-				c, err := rt.effectiveContextWithSecrets()
-				if err != nil {
-					return err
+	)
+	var showKey bool
+	showCmd := &cobra.Command{
+		Use:   "show",
+		Short: "Show active context",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := rt.activeContextName()
+			c, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
+			out := map[string]any{
+				"name":         name,
+				"base_url":     c.BaseURL,
+				"org_id":       c.OrgID,
+				"workspace_id": c.WorkspaceID,
+				"owner_agent":  c.OwnerAgent,
+				"environment":  c.Environment,
+				"has_api_key":  c.APIKey != "",
+				"has_actor":    c.resolvedActorToken() != "",
+				"has_bearer":   c.BearerToken != "",
+			}
+			if showKey && c.APIKey != "" {
+				out["api_key"] = c.APIKey
+			}
+			if personalContext, err := rt.personalContextFromServer(cmd.Context(), c); err == nil {
+				if serverContext := asMap(personalContext["context"]); len(serverContext) > 0 {
+					out["server_context"] = serverContext
 				}
-				out := map[string]any{
-					"name":         name,
-					"base_url":     c.BaseURL,
-					"org_id":       c.OrgID,
-					"workspace_id": c.WorkspaceID,
-					"owner_agent":  c.OwnerAgent,
-					"environment":  c.Environment,
-					"has_api_key":  c.APIKey != "",
-					"has_actor":    c.resolvedActorToken() != "",
-					"has_bearer":   c.BearerToken != "",
+				if selectedOrg := asMap(personalContext["selected_organization"]); len(selectedOrg) > 0 {
+					out["selected_organization"] = selectedOrg
 				}
-				if personalContext, err := rt.personalContextFromServer(cmd.Context(), c); err == nil {
-					if serverContext := asMap(personalContext["context"]); len(serverContext) > 0 {
-						out["server_context"] = serverContext
-					}
-					if selectedOrg := asMap(personalContext["selected_organization"]); len(selectedOrg) > 0 {
-						out["selected_organization"] = selectedOrg
-					}
-					if selectedWorkspace := asMap(personalContext["selected_workspace"]); len(selectedWorkspace) > 0 {
-						out["selected_workspace"] = selectedWorkspace
-					}
-					if guidance := asMap(personalContext["guidance"]); len(guidance) > 0 {
-						out["server_guidance"] = guidance
-					}
-				} else {
-					out["server_context_error"] = err.Error()
+				if selectedWorkspace := asMap(personalContext["selected_workspace"]); len(selectedWorkspace) > 0 {
+					out["selected_workspace"] = selectedWorkspace
 				}
-				return rt.printGeneric(out)
-			},
+				if guidance := asMap(personalContext["guidance"]); len(guidance) > 0 {
+					out["server_guidance"] = guidance
+				}
+			} else {
+				out["server_context_error"] = err.Error()
+			}
+			return rt.printGeneric(out)
 		},
+	}
+	showCmd.Flags().BoolVar(&showKey, "show-key", false, "include the raw api_key value in output")
+	cmd.AddCommand(
+		showCmd,
 		newContextUseCmd(rt),
 		newContextSetCmd(rt),
 	)
