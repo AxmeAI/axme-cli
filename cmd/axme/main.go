@@ -63,16 +63,17 @@ type clientConfig struct {
 }
 
 type runtime struct {
-	cfgFile      string
-	cfg          *appConfig
-	secretStore  secretStore
-	httpClient   *http.Client
-	outputJSON   bool
-	contextName  string
-	overrideBase string
-	overrideKey  string
-	overrideJWT  string
-	overrideOrg  string
+	cfgFile       string
+	cfg           *appConfig
+	secretStore   secretStore
+	httpClient    *http.Client
+	streamClient  *http.Client // no timeout — used for SSE long-polling streams
+	outputJSON    bool
+	contextName   string
+	overrideBase  string
+	overrideKey   string
+	overrideJWT   string
+	overrideOrg   string
 	overrideWs   string
 	overrideOwn  string
 	overrideEnv  string
@@ -109,6 +110,10 @@ func run() int {
 		httpClient: &http.Client{
 			Timeout: 25 * time.Second,
 		},
+		// streamClient has no Timeout so SSE long-polls are not cut off by the
+		// client after 25 s. Individual stream calls pass a context with cancel
+		// (Ctrl-C) as the only cancellation mechanism.
+		streamClient: &http.Client{},
 	}
 	secretStore, err := initSecretStore(cfgFile)
 	if err != nil {
@@ -2565,7 +2570,7 @@ func (rt *runtime) streamEvents(ctx context.Context, c *clientConfig, intentID s
 		return since, err
 	}
 	rt.applyAuthHeaders(req, c)
-	resp, err := rt.httpClient.Do(req)
+	resp, err := rt.streamClient.Do(req)
 	if err != nil {
 		return since, err
 	}
@@ -2575,6 +2580,9 @@ func (rt *runtime) streamEvents(ctx context.Context, c *clientConfig, intentID s
 		return since, &cliError{Code: 1, Msg: fmt.Sprintf("stream failed: %s", string(raw))}
 	}
 	sc := bufio.NewScanner(resp.Body)
+	// Default MaxScanTokenSize is 64 KB. Increase to 1 MB to handle large
+	// event payloads (e.g. intents with large embedded results).
+	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	lineEvent := ""
 	lineData := ""
 	lineID := since
@@ -2598,7 +2606,11 @@ func (rt *runtime) streamEvents(ctx context.Context, c *clientConfig, intentID s
 			if rt.outputJSON {
 				_ = rt.printJSON(payload)
 			} else {
-				fmt.Printf("[%v] %v status=%v waiting=%v\n", payload["at"], payload["event_type"], payload["status"], payload["waiting_reason"])
+				line := fmt.Sprintf("[%v] %v status=%v", payload["at"], payload["event_type"], payload["status"])
+				if wr := asString(payload["waiting_reason"]); wr != "" {
+					line += " waiting=" + wr
+				}
+				fmt.Println(line)
 			}
 		}
 		lineEvent, lineData, lineID = "", "", 0
@@ -2779,11 +2791,10 @@ func (rt *runtime) doRequest(ctx context.Context, c *clientConfig, method, path 
 	rawBody, _ := io.ReadAll(resp.Body)
 	rawStr := string(rawBody)
 	out := map[string]any{}
-	if expectJSON && len(rawBody) > 0 {
-		_ = json.Unmarshal(rawBody, &out)
-	} else if !expectJSON && len(rawBody) > 0 && len(rawBody) < 4096 {
-		// Always try to parse error responses as JSON regardless of expectJSON,
-		// so that auto-refresh and error handling can inspect error codes.
+	if len(rawBody) > 0 {
+		// Always attempt JSON parsing: success bodies need structured access
+		// (e.g. quota show reads nested overview.quota_policy which can exceed
+		// 4 KB), and error bodies need code inspection for auto-refresh logic.
 		_ = json.Unmarshal(rawBody, &out)
 	}
 	return resp.StatusCode, out, rawStr, nil
@@ -2838,7 +2849,7 @@ func httpErrorMessage(status int, raw string) string {
 			if d.ResetAt != "" {
 				msg += fmt.Sprintf(" Resets at %s.", d.ResetAt)
 			}
-			msg += "\nRun `axme quota show` to check your limits, or `axme quota upgrade-request` to request higher limits."
+			msg += "\nRun `axme quota show` to check your limits, or email hello@axme.ai to request higher limits."
 			return msg
 		}
 		return "Rate limit exceeded. Please wait before retrying."
@@ -3276,6 +3287,8 @@ func (rt *runtime) enterpriseMembersAPIError(status int, body map[string]any, ra
 		return &cliError{Code: 2, Msg: detail}
 	case status == 422 && strings.TrimSpace(detail) != "":
 		return &cliError{Code: 2, Msg: detail}
+	case status == 429:
+		return &cliError{Code: 1, Msg: httpErrorMessage(status, raw)}
 	default:
 		return fmt.Errorf("enterprise member request returned %d: %s", status, raw)
 	}
@@ -3306,6 +3319,8 @@ func (rt *runtime) serviceAccountsAPIError(status int, body map[string]any, raw 
 		return &cliError{Code: 2, Msg: detail}
 	case status == 422 && strings.TrimSpace(detail) != "":
 		return &cliError{Code: 2, Msg: detail}
+	case status == 429:
+		return &cliError{Code: 1, Msg: httpErrorMessage(status, raw)}
 	default:
 		return fmt.Errorf("service account request returned %d: %s", status, raw)
 	}
