@@ -1303,45 +1303,53 @@ func newContextCmd(rt *runtime) *cobra.Command {
 				return nil
 			},
 		},
-		&cobra.Command{
-			Use:   "show",
-			Short: "Show active context",
-			RunE: func(cmd *cobra.Command, args []string) error {
-				name := rt.activeContextName()
-				c, err := rt.effectiveContextWithSecrets()
-				if err != nil {
-					return err
+	)
+	var showKey bool
+	showCmd := &cobra.Command{
+		Use:   "show",
+		Short: "Show active context",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := rt.activeContextName()
+			c, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
+			out := map[string]any{
+				"name":         name,
+				"base_url":     c.BaseURL,
+				"org_id":       c.OrgID,
+				"workspace_id": c.WorkspaceID,
+				"owner_agent":  c.OwnerAgent,
+				"environment":  c.Environment,
+				"has_api_key":  c.APIKey != "",
+				"has_actor":    c.resolvedActorToken() != "",
+				"has_bearer":   c.BearerToken != "",
+			}
+			if showKey && c.APIKey != "" {
+				out["api_key"] = c.APIKey
+			}
+			if personalContext, err := rt.personalContextFromServer(cmd.Context(), c); err == nil {
+				if serverContext := asMap(personalContext["context"]); len(serverContext) > 0 {
+					out["server_context"] = serverContext
 				}
-				out := map[string]any{
-					"name":         name,
-					"base_url":     c.BaseURL,
-					"org_id":       c.OrgID,
-					"workspace_id": c.WorkspaceID,
-					"owner_agent":  c.OwnerAgent,
-					"environment":  c.Environment,
-					"has_api_key":  c.APIKey != "",
-					"has_actor":    c.resolvedActorToken() != "",
-					"has_bearer":   c.BearerToken != "",
+				if selectedOrg := asMap(personalContext["selected_organization"]); len(selectedOrg) > 0 {
+					out["selected_organization"] = selectedOrg
 				}
-				if personalContext, err := rt.personalContextFromServer(cmd.Context(), c); err == nil {
-					if serverContext := asMap(personalContext["context"]); len(serverContext) > 0 {
-						out["server_context"] = serverContext
-					}
-					if selectedOrg := asMap(personalContext["selected_organization"]); len(selectedOrg) > 0 {
-						out["selected_organization"] = selectedOrg
-					}
-					if selectedWorkspace := asMap(personalContext["selected_workspace"]); len(selectedWorkspace) > 0 {
-						out["selected_workspace"] = selectedWorkspace
-					}
-					if guidance := asMap(personalContext["guidance"]); len(guidance) > 0 {
-						out["server_guidance"] = guidance
-					}
-				} else {
-					out["server_context_error"] = err.Error()
+				if selectedWorkspace := asMap(personalContext["selected_workspace"]); len(selectedWorkspace) > 0 {
+					out["selected_workspace"] = selectedWorkspace
 				}
-				return rt.printGeneric(out)
-			},
+				if guidance := asMap(personalContext["guidance"]); len(guidance) > 0 {
+					out["server_guidance"] = guidance
+				}
+			} else {
+				out["server_context_error"] = err.Error()
+			}
+			return rt.printGeneric(out)
 		},
+	}
+	showCmd.Flags().BoolVar(&showKey, "show-key", false, "include the raw api_key value in output")
+	cmd.AddCommand(
+		showCmd,
 		newContextUseCmd(rt),
 		newContextSetCmd(rt),
 	)
@@ -1536,7 +1544,7 @@ func newRunCmd(rt *runtime) *cobra.Command {
 }
 
 func newIntentsCmd(rt *runtime) *cobra.Command {
-	cmd := &cobra.Command{Use: "intents", Short: "Durable execution intents"}
+	cmd := &cobra.Command{Use: "intents", Aliases: []string{"intent"}, Short: "Durable execution intents"}
 	cmd.AddCommand(newIntentsListCmd(rt), newIntentsGetCmd(rt), newIntentsWatchCmd(rt), newIntentsCancelCmd(rt), newIntentsRetryCmd(rt), newIntentsResumeCmd(rt))
 	return cmd
 }
@@ -1561,6 +1569,9 @@ func newIntentsListCmd(rt *runtime) *cobra.Command {
 				}
 				if strings.TrimSpace(detail) == "" {
 					return &cliError{Code: 1, Msg: "failed to list inbox threads"}
+				}
+				if status == 401 || strings.Contains(detail, "token") || strings.Contains(detail, "bearer") {
+					return &cliError{Code: 1, Msg: "Authentication failed. Run `axme login` to sign in."}
 				}
 				return &cliError{Code: 1, Msg: fmt.Sprintf("failed to list inbox threads: %s", detail)}
 			}
@@ -1663,6 +1674,7 @@ func newIntentsWatchCmd(rt *runtime) *cobra.Command {
 			intentID := args[0]
 			ctx := rt.effectiveContext()
 			next := since + 1
+			fmt.Fprintf(cmd.ErrOrStderr(), "Streaming lifecycle events for %s (live SSE — press Ctrl+C to exit)\n\n", intentID)
 			for {
 				n, err := rt.streamEvents(cmd.Context(), ctx, intentID, next)
 				if err != nil {
@@ -1843,7 +1855,7 @@ func newTraceCmd(rt *runtime) *cobra.Command {
 }
 
 func newAgentsCmd(rt *runtime) *cobra.Command {
-	cmd := &cobra.Command{Use: "agents", Short: "Registry/agent operations"}
+	cmd := &cobra.Command{Use: "agents", Aliases: []string{"agent"}, Short: "Registry/agent operations"}
 	cmd.AddCommand(newAgentsListCmd(rt), newAgentsRegisterCmd(rt), newAgentsResolveCmd(rt))
 	return cmd
 }
@@ -1993,7 +2005,7 @@ func newKeysCmd(rt *runtime) *cobra.Command {
 func newServiceAccountsCmd(rt *runtime) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "service-accounts",
-		Aliases: []string{"serviceaccounts"},
+		Aliases: []string{"serviceaccounts", "service-account"},
 		Short:   "Manage service accounts and their keys",
 	}
 	cmd.AddCommand(
@@ -2296,8 +2308,9 @@ func newStatusCmd(rt *runtime) *cobra.Command {
 
 func newDoctorCmd(rt *runtime) *cobra.Command {
 	return &cobra.Command{
-		Use:   "doctor",
-		Short: "Configuration and API diagnostics",
+		Use:     "doctor",
+		Aliases: []string{"diagnostics"},
+		Short:   "Configuration and API diagnostics",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, err := rt.effectiveContextWithSecrets()
 			if err != nil {
@@ -2613,9 +2626,16 @@ func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path st
 	// and we have a refresh token, silently refresh before sending the request.
 	// This avoids the reactive 401 round-trip in the common case and prevents
 	// failures when the token expires mid-flight.
+	//
+	// proactiveRefreshed tracks whether we already consumed the refresh token here so
+	// that the reactive 401 path below does NOT attempt a second refresh — reusing a
+	// one-time-use token triggers reuse-detection on the server and invalidates the
+	// entire session.
+	proactiveRefreshed := false
 	if c.RefreshToken != "" && c.resolvedActorToken() != "" {
 		if secs := jwtSecondsUntilExpiry(c.resolvedActorToken()); secs >= 0 && secs < 60 {
 			_, _ = rt.tryRefreshActorToken(ctx, c)
+			proactiveRefreshed = true
 		}
 	}
 	status, body, raw, err := rt.doRequest(ctx, c, method, path, query, payload, expectJSON)
@@ -2623,7 +2643,8 @@ func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path st
 		return status, body, raw, err
 	}
 	// Auto-refresh: if we get 401 with an expired/invalid actor token and have a refresh token, try once.
-	if status == 401 && c.RefreshToken != "" && c.resolvedActorToken() != "" {
+	// Skip if we already did a proactive refresh above to avoid double-consuming the one-time-use token.
+	if status == 401 && !proactiveRefreshed && c.RefreshToken != "" && c.resolvedActorToken() != "" {
 		code := asString(asMap(body["error"])["code"])
 		detail := asString(body["detail"])
 		isTokenError := code == "token_expired" || code == "invalid_actor_token" ||
@@ -2781,6 +2802,12 @@ func httpErrorMessage(status int, raw string) string {
 		Error struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
+			Details struct {
+				Dimension string `json:"dimension"`
+				Used      int    `json:"used"`
+				Limit     int    `json:"limit"`
+				ResetAt   string `json:"reset_at"`
+			} `json:"details"`
 		} `json:"error"`
 		Detail string `json:"detail"`
 	}
@@ -2804,6 +2831,16 @@ func httpErrorMessage(status int, raw string) string {
 		}
 		return "Not found."
 	case status == 429:
+		if parsed.Error.Code == "quota_exceeded" {
+			d := parsed.Error.Details
+			dim := strings.ReplaceAll(d.Dimension, "_", " ")
+			msg := fmt.Sprintf("Quota exceeded: %s (used %d of %d).", dim, d.Used, d.Limit)
+			if d.ResetAt != "" {
+				msg += fmt.Sprintf(" Resets at %s.", d.ResetAt)
+			}
+			msg += "\nRun `axme quota show` to check your limits, or `axme quota upgrade-request` to request higher limits."
+			return msg
+		}
 		return "Rate limit exceeded. Please wait before retrying."
 	case status >= 500:
 		return fmt.Sprintf("Server error (%d). Please try again later.", status)
