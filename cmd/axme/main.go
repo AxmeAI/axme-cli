@@ -1674,6 +1674,7 @@ func newIntentsWatchCmd(rt *runtime) *cobra.Command {
 			intentID := args[0]
 			ctx := rt.effectiveContext()
 			next := since + 1
+			fmt.Fprintf(cmd.ErrOrStderr(), "Streaming lifecycle events for %s (live SSE — press Ctrl+C to exit)\n\n", intentID)
 			for {
 				n, err := rt.streamEvents(cmd.Context(), ctx, intentID, next)
 				if err != nil {
@@ -2801,6 +2802,12 @@ func httpErrorMessage(status int, raw string) string {
 		Error struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
+			Details struct {
+				Dimension string `json:"dimension"`
+				Used      int    `json:"used"`
+				Limit     int    `json:"limit"`
+				ResetAt   string `json:"reset_at"`
+			} `json:"details"`
 		} `json:"error"`
 		Detail string `json:"detail"`
 	}
@@ -2824,6 +2831,16 @@ func httpErrorMessage(status int, raw string) string {
 		}
 		return "Not found."
 	case status == 429:
+		if parsed.Error.Code == "quota_exceeded" {
+			d := parsed.Error.Details
+			dim := strings.ReplaceAll(d.Dimension, "_", " ")
+			msg := fmt.Sprintf("Quota exceeded: %s (used %d of %d).", dim, d.Used, d.Limit)
+			if d.ResetAt != "" {
+				msg += fmt.Sprintf(" Resets at %s.", d.ResetAt)
+			}
+			msg += "\nRun `axme quota show` to check your limits, or `axme quota upgrade-request` to request higher limits."
+			return msg
+		}
 		return "Rate limit exceeded. Please wait before retrying."
 	case status >= 500:
 		return fmt.Sprintf("Server error (%d). Please try again later.", status)
