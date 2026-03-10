@@ -178,6 +178,9 @@ func printUpdateHint(ch <-chan string) {
 	if ch == nil {
 		return
 	}
+	// Give the background goroutine a short window to finish. For fast commands
+	// (e.g. `axme version`) the HTTP check may still be in flight; waiting up to
+	// 500ms avoids silently dropping the hint while keeping startup latency low.
 	select {
 	case hint, ok := <-ch:
 		if ok && hint != "" {
@@ -188,8 +191,8 @@ func printUpdateHint(ch <-chan string) {
 			}
 			fmt.Fprintln(os.Stderr, "╰─────────────────────────────────────────────────╯")
 		}
-	default:
-		// Check not done yet — don't block execution
+	case <-time.After(500 * time.Millisecond):
+		// Background check still running — skip hint to avoid blocking the user
 	}
 }
 

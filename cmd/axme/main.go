@@ -1536,7 +1536,7 @@ func newRunCmd(rt *runtime) *cobra.Command {
 }
 
 func newIntentsCmd(rt *runtime) *cobra.Command {
-	cmd := &cobra.Command{Use: "intents", Short: "Durable execution intents"}
+	cmd := &cobra.Command{Use: "intents", Aliases: []string{"intent"}, Short: "Durable execution intents"}
 	cmd.AddCommand(newIntentsListCmd(rt), newIntentsGetCmd(rt), newIntentsWatchCmd(rt), newIntentsCancelCmd(rt), newIntentsRetryCmd(rt), newIntentsResumeCmd(rt))
 	return cmd
 }
@@ -1561,6 +1561,9 @@ func newIntentsListCmd(rt *runtime) *cobra.Command {
 				}
 				if strings.TrimSpace(detail) == "" {
 					return &cliError{Code: 1, Msg: "failed to list inbox threads"}
+				}
+				if status == 401 || strings.Contains(detail, "token") || strings.Contains(detail, "bearer") {
+					return &cliError{Code: 1, Msg: "Authentication failed. Run `axme login` to sign in."}
 				}
 				return &cliError{Code: 1, Msg: fmt.Sprintf("failed to list inbox threads: %s", detail)}
 			}
@@ -1843,7 +1846,7 @@ func newTraceCmd(rt *runtime) *cobra.Command {
 }
 
 func newAgentsCmd(rt *runtime) *cobra.Command {
-	cmd := &cobra.Command{Use: "agents", Short: "Registry/agent operations"}
+	cmd := &cobra.Command{Use: "agents", Aliases: []string{"agent"}, Short: "Registry/agent operations"}
 	cmd.AddCommand(newAgentsListCmd(rt), newAgentsRegisterCmd(rt), newAgentsResolveCmd(rt))
 	return cmd
 }
@@ -1993,7 +1996,7 @@ func newKeysCmd(rt *runtime) *cobra.Command {
 func newServiceAccountsCmd(rt *runtime) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "service-accounts",
-		Aliases: []string{"serviceaccounts"},
+		Aliases: []string{"serviceaccounts", "service-account"},
 		Short:   "Manage service accounts and their keys",
 	}
 	cmd.AddCommand(
@@ -2296,8 +2299,9 @@ func newStatusCmd(rt *runtime) *cobra.Command {
 
 func newDoctorCmd(rt *runtime) *cobra.Command {
 	return &cobra.Command{
-		Use:   "doctor",
-		Short: "Configuration and API diagnostics",
+		Use:     "doctor",
+		Aliases: []string{"diagnostics"},
+		Short:   "Configuration and API diagnostics",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, err := rt.effectiveContextWithSecrets()
 			if err != nil {
@@ -2613,9 +2617,16 @@ func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path st
 	// and we have a refresh token, silently refresh before sending the request.
 	// This avoids the reactive 401 round-trip in the common case and prevents
 	// failures when the token expires mid-flight.
+	//
+	// proactiveRefreshed tracks whether we already consumed the refresh token here so
+	// that the reactive 401 path below does NOT attempt a second refresh — reusing a
+	// one-time-use token triggers reuse-detection on the server and invalidates the
+	// entire session.
+	proactiveRefreshed := false
 	if c.RefreshToken != "" && c.resolvedActorToken() != "" {
 		if secs := jwtSecondsUntilExpiry(c.resolvedActorToken()); secs >= 0 && secs < 60 {
 			_, _ = rt.tryRefreshActorToken(ctx, c)
+			proactiveRefreshed = true
 		}
 	}
 	status, body, raw, err := rt.doRequest(ctx, c, method, path, query, payload, expectJSON)
@@ -2623,7 +2634,8 @@ func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path st
 		return status, body, raw, err
 	}
 	// Auto-refresh: if we get 401 with an expired/invalid actor token and have a refresh token, try once.
-	if status == 401 && c.RefreshToken != "" && c.resolvedActorToken() != "" {
+	// Skip if we already did a proactive refresh above to avoid double-consuming the one-time-use token.
+	if status == 401 && !proactiveRefreshed && c.RefreshToken != "" && c.resolvedActorToken() != "" {
 		code := asString(asMap(body["error"])["code"])
 		detail := asString(body["detail"])
 		isTokenError := code == "token_expired" || code == "invalid_actor_token" ||
