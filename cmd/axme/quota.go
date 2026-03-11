@@ -146,24 +146,26 @@ func newQuotaShowCmd(rt *runtime) *cobra.Command {
 
 func newQuotaSetCmd(rt *runtime) *cobra.Command {
 	var intentsPerDay int
-	var inboxWritesPerDay int
 	var actorsTotal int
 	var serviceAccountsPerWorkspace int
 	var overageMode string
 	var hardEnforcement bool
 
 	cmd := &cobra.Command{
-		Use:   "set",
-		Short: "Set quota limits for your workspace (org_admin required)",
-		Long: `Update quota limits for your workspace. Requires org_admin role.
+		Use:    "set",
+		Short:  "Set quota limits for your workspace (operator only — requires platform key)",
+		Hidden: true, // operator-only; not exposed in public CLI help
+		Long: `Update quota limits for your workspace.
+
+This command is intended for platform operators only and requires a platform API key.
+Regular users should use 'axme quota upgrade-request' to request higher limits.
 
 Dimensions:
   intents-per-day              max intents created per calendar day (UTC)
-  inbox-writes-per-day         max inbox writes per calendar day (UTC)
   actors-total                 max total org members
   service-accounts-per-workspace  max service accounts in workspace`,
-		Example: `  axme quota set --intents-per-day 10 --overage-mode block
-  axme quota set --intents-per-day 1000 --service-accounts-per-workspace 20`,
+		Example: `  axme quota set --intents-per-day 500 --overage-mode block
+  axme quota set --actors-total 20 --service-accounts-per-workspace 10`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c := rt.effectiveContext()
 			if c.OrgID == "" || c.WorkspaceID == "" {
@@ -174,9 +176,6 @@ Dimensions:
 			if cmd.Flags().Changed("intents-per-day") {
 				dimensions["intents_per_day"] = intentsPerDay
 			}
-			if cmd.Flags().Changed("inbox-writes-per-day") {
-				dimensions["inbox_writes_per_day"] = inboxWritesPerDay
-			}
 			if cmd.Flags().Changed("actors-total") {
 				dimensions["actors_total"] = actorsTotal
 			}
@@ -184,7 +183,7 @@ Dimensions:
 				dimensions["service_accounts_per_workspace"] = serviceAccountsPerWorkspace
 			}
 			if len(dimensions) == 0 {
-				return fmt.Errorf("specify at least one dimension flag (--intents-per-day, --actors-total, etc.)")
+				return fmt.Errorf("specify at least one dimension flag (--intents-per-day, --actors-total, --service-accounts-per-workspace)")
 			}
 
 			actorID := c.OwnerAgent
@@ -233,7 +232,6 @@ Dimensions:
 		},
 	}
 	cmd.Flags().IntVar(&intentsPerDay, "intents-per-day", 0, "Max intents per calendar day")
-	cmd.Flags().IntVar(&inboxWritesPerDay, "inbox-writes-per-day", 0, "Max inbox writes per calendar day")
 	cmd.Flags().IntVar(&actorsTotal, "actors-total", 0, "Max total actors in org")
 	cmd.Flags().IntVar(&serviceAccountsPerWorkspace, "service-accounts-per-workspace", 0, "Max service accounts in workspace")
 	cmd.Flags().StringVar(&overageMode, "overage-mode", "block", "Overage mode: block, grace, bill_overage")
