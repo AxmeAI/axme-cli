@@ -2810,8 +2810,20 @@ func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path st
 	// one-time-use token triggers reuse-detection on the server and invalidates the
 	// entire session.
 	proactiveRefreshed := false
-	if c.RefreshToken != "" && c.resolvedActorToken() != "" {
-		if secs := jwtSecondsUntilExpiry(c.resolvedActorToken()); secs >= 0 && secs < 60 {
+	if c.RefreshToken != "" {
+		// Refresh proactively if the actor token is absent (empty/cleared) or
+		// expires within 5 minutes (300 s). The wider window reduces the chance
+		// of an in-flight token expiry and eliminates the reactive 401 round-trip
+		// in the common case.
+		//
+		// Previously this only triggered when resolvedActorToken() was non-empty,
+		// which meant an already-expired (cleared) token never got refreshed
+		// proactively — the request went out without a bearer, hit a 401, and the
+		// reactive path consumed the one-time-use refresh token without the
+		// proactive path having a chance to save the rotated token first.
+		actorToken := c.resolvedActorToken()
+		secs := jwtSecondsUntilExpiry(actorToken)
+		if actorToken == "" || (secs >= 0 && secs < 300) {
 			_, _ = rt.tryRefreshActorToken(ctx, c)
 			proactiveRefreshed = true
 		}
