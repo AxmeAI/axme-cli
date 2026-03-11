@@ -101,13 +101,21 @@ func (s *fileSecretStore) Save(contextName string, secrets storedContextSecrets)
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(secrets.APIKey) == "" && strings.TrimSpace(secrets.ActorToken) == "" {
+	apiKey := strings.TrimSpace(secrets.APIKey)
+	actorToken := strings.TrimSpace(secrets.ActorToken)
+	refreshToken := strings.TrimSpace(secrets.RefreshToken)
+	// Only delete the context entry when ALL three credentials are absent.
+	// Previously the condition only checked APIKey+ActorToken which caused
+	// the refresh_token to be silently dropped when called with an expired
+	// (empty) actor_token during proactive refresh, breaking the 30-day
+	// session and forcing a full email re-login.
+	if apiKey == "" && actorToken == "" && refreshToken == "" {
 		delete(allSecrets, contextName)
 	} else {
 		allSecrets[contextName] = storedContextSecrets{
-			APIKey:       strings.TrimSpace(secrets.APIKey),
-			ActorToken:   strings.TrimSpace(secrets.ActorToken),
-			RefreshToken: strings.TrimSpace(secrets.RefreshToken),
+			APIKey:       apiKey,
+			ActorToken:   actorToken,
+			RefreshToken: refreshToken,
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
@@ -117,7 +125,38 @@ func (s *fileSecretStore) Save(contextName string, secrets storedContextSecrets)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, raw, 0o600)
+	// Write atomically: temp file → fsync → rename.
+	// A direct WriteFile leaves a window where a crash produces a truncated/empty
+	// secrets.json, losing the refresh_token and killing the session.
+	dir := filepath.Dir(s.path)
+	tmp, err := os.CreateTemp(dir, ".secrets-*.tmp")
+	if err != nil {
+		return fmt.Errorf("secrets save: create temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("secrets save: write temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("secrets save: sync temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("secrets save: close temp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("secrets save: chmod: %w", err)
+	}
+	if err := os.Rename(tmpPath, s.path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("secrets save: rename: %w", err)
+	}
+	return nil
 }
 
 func (s *fileSecretStore) readAll() (map[string]storedContextSecrets, error) {
