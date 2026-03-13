@@ -28,6 +28,7 @@ Authenticate with 'axme login' first; the actor bearer token is sent automatical
 		newTasksGetCmd(rt),
 		newTasksApproveCmd(rt),
 		newTasksRejectCmd(rt),
+		newTasksSubmitCmd(rt),
 	)
 	return cmd
 }
@@ -200,6 +201,62 @@ func newTasksRejectCmd(rt *runtime) *cobra.Command {
 }
 
 // ---------------------------------------------------------------------------
+// axme tasks submit <intent_id> --outcome <outcome> [--comment <text>] [--data k=v...]
+// ---------------------------------------------------------------------------
+
+func newTasksSubmitCmd(rt *runtime) *cobra.Command {
+	var outcome string
+	var comment string
+	var data map[string]string
+	var dataJSON string
+
+	cmd := &cobra.Command{
+		Use:   "submit <intent_id>",
+		Short: "Submit a structured task_result with an arbitrary outcome",
+		Long: `Submit a task_result to any pending task.
+
+Use this when the task has custom allowed_outcomes beyond approve/reject,
+or when you need to pass structured data alongside the outcome.
+
+Examples:
+  axme tasks submit <id> --outcome escalated
+  axme tasks submit <id> --outcome provided --comment "Here are the details"
+  axme tasks submit <id> --outcome submitted --data field1=value1 --data field2=value2
+  axme tasks submit <id> --outcome submitted --data-json '{"field1":"value1"}'`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			intentID := args[0]
+			if outcome == "" {
+				return &cliError{Code: 1, Msg: "required flag --outcome not set"}
+			}
+
+			// --data-json overrides individual --data flags when both are provided
+			var extraData map[string]string
+			if dataJSON != "" {
+				var parsed map[string]interface{}
+				if err := json.Unmarshal([]byte(dataJSON), &parsed); err != nil {
+					return &cliError{Code: 1, Msg: fmt.Sprintf("invalid --data-json: %v", err)}
+				}
+				extraData = make(map[string]string, len(parsed))
+				for k, v := range parsed {
+					extraData[k] = fmt.Sprintf("%v", v)
+				}
+			} else {
+				extraData = data
+			}
+
+			return submitTaskResult(rt, cmd, intentID, outcome, comment, extraData)
+		},
+	}
+	cmd.Flags().StringVarP(&outcome, "outcome", "o", "", "Outcome value (required) — must match allowed_outcomes if defined")
+	cmd.Flags().StringVarP(&comment, "comment", "c", "", "Optional comment to include in task_result")
+	cmd.Flags().StringToStringVar(&data, "data", nil, "Additional key=value data fields (repeatable: --data k=v)")
+	cmd.Flags().StringVar(&dataJSON, "data-json", "", "Structured data as JSON object (alternative to --data)")
+	_ = cmd.MarkFlagRequired("outcome")
+	return cmd
+}
+
+// ---------------------------------------------------------------------------
 // Shared: submit task_result via POST /v1/intents/{id}/resume
 // ---------------------------------------------------------------------------
 
@@ -243,11 +300,7 @@ func submitTaskResult(rt *runtime, cmd *cobra.Command, intentID, outcome, commen
 		return nil
 	}
 
-	verb := "approved"
-	if outcome == "rejected" {
-		verb = "rejected"
-	}
-	fmt.Printf("✓ Task %s: %s\n", verb, intentID)
+	fmt.Printf("✓ Task submitted: %s (outcome=%s)\n", intentID, outcome)
 	fmt.Printf("\nTrack with: axme intents get %s\n", intentID)
 	return nil
 }
