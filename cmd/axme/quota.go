@@ -29,6 +29,7 @@ To request corporate limits, run: axme quota upgrade-request`,
 	}
 	cmd.AddCommand(
 		newQuotaShowCmd(rt),
+		newQuotaSetCmd(rt),
 		newQuotaUpgradeRequestCmd(rt),
 	)
 	return cmd
@@ -80,7 +81,7 @@ func newQuotaShowCmd(rt *runtime) *cobra.Command {
 
 			if len(dims) == 0 {
 				fmt.Println("No quota policy found for this workspace.")
-				fmt.Println("Contact support or run `axme quota upgrade-request` to request limits.")
+				fmt.Println("To request limits, email hello@axme.ai with your org email and usage scenario.")
 				return nil
 			}
 
@@ -132,10 +133,109 @@ func newQuotaShowCmd(rt *runtime) *cobra.Command {
 			hard := quotaPolicy["hard_enforcement"]
 			fmt.Printf("overage_mode=%s  hard_enforcement=%v\n", overage, hard)
 			fmt.Println()
-			fmt.Println("To request higher limits: axme quota upgrade-request --company \"...\" --justification \"...\"")
+			fmt.Println("To request higher limits, email hello@axme.ai with your org email and a description of your use case.")
 			return nil
 		},
 	}
+	return cmd
+}
+
+// ---------------------------------------------------------------------------
+// axme quota set
+// ---------------------------------------------------------------------------
+
+func newQuotaSetCmd(rt *runtime) *cobra.Command {
+	var intentsPerDay int
+	var actorsTotal int
+	var serviceAccountsPerWorkspace int
+	var overageMode string
+	var hardEnforcement bool
+
+	cmd := &cobra.Command{
+		Use:    "set",
+		Short:  "Set quota limits for your workspace (operator only — requires platform key)",
+		Hidden: true, // operator-only; not exposed in public CLI help
+		Long: `Update quota limits for your workspace.
+
+This command is intended for platform operators only and requires a platform API key.
+Regular users should use 'axme quota upgrade-request' to request higher limits.
+
+Dimensions:
+  intents-per-day              max intents created per calendar day (UTC)
+  actors-total                 max total org members
+  service-accounts-per-workspace  max service accounts in workspace`,
+		Example: `  axme quota set --intents-per-day 500 --overage-mode block
+  axme quota set --actors-total 20 --service-accounts-per-workspace 10`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			c := rt.effectiveContext()
+			if c.OrgID == "" || c.WorkspaceID == "" {
+				return fmt.Errorf("org_id and workspace_id must be set in the active context")
+			}
+
+			dimensions := map[string]any{}
+			if cmd.Flags().Changed("intents-per-day") {
+				dimensions["intents_per_day"] = intentsPerDay
+			}
+			if cmd.Flags().Changed("actors-total") {
+				dimensions["actors_total"] = actorsTotal
+			}
+			if cmd.Flags().Changed("service-accounts-per-workspace") {
+				dimensions["service_accounts_per_workspace"] = serviceAccountsPerWorkspace
+			}
+			if len(dimensions) == 0 {
+				return fmt.Errorf("specify at least one dimension flag (--intents-per-day, --actors-total, --service-accounts-per-workspace)")
+			}
+
+			actorID := c.OwnerAgent
+			if actorID == "" {
+				actorID = "cli"
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			payload := map[string]any{
+				"org_id":               c.OrgID,
+				"workspace_id":         c.WorkspaceID,
+				"dimensions":           dimensions,
+				"overage_mode":         overageMode,
+				"hard_enforcement":     hardEnforcement,
+				"updated_by_actor_id":  actorID,
+			}
+
+			status, body, raw, err := rt.request(ctx, c, "PATCH", "/v1/quotas", nil, payload, false)
+			if err != nil {
+				return err
+			}
+			if status >= 400 {
+				return fmt.Errorf("%s", httpErrorMessage(status, raw))
+			}
+			if rt.outputJSON {
+				fmt.Println(raw)
+				return nil
+			}
+
+			policy := asMap(body["quota_policy"])
+			fmt.Println("Quota updated.")
+			if policy != nil {
+				dims := asMap(policy["dimensions"])
+				w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(w, "DIMENSION\tLIMIT")
+				for k, v := range dims {
+					fmt.Fprintf(w, "%s\t%v\n", strings.ReplaceAll(k, "_", " "), v)
+				}
+				_ = w.Flush()
+				fmt.Printf("\noverage_mode=%s  hard_enforcement=%v\n", asString(policy["overage_mode"]), policy["hard_enforcement"])
+			}
+			fmt.Println("\nRun `axme quota show` to verify.")
+			return nil
+		},
+	}
+	cmd.Flags().IntVar(&intentsPerDay, "intents-per-day", 0, "Max intents per calendar day")
+	cmd.Flags().IntVar(&actorsTotal, "actors-total", 0, "Max total actors in org")
+	cmd.Flags().IntVar(&serviceAccountsPerWorkspace, "service-accounts-per-workspace", 0, "Max service accounts in workspace")
+	cmd.Flags().StringVar(&overageMode, "overage-mode", "block", "Overage mode: block, grace, bill_overage")
+	cmd.Flags().BoolVar(&hardEnforcement, "hard-enforcement", true, "Block requests when limit reached (default: true)")
 	return cmd
 }
 
@@ -184,9 +284,14 @@ Valid upgrade tiers:
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
+			requesterID := c.OwnerAgent
+			if requesterID == "" {
+				requesterID = "cli"
+			}
+
 			payload := map[string]any{
 				"request_type":       "quota_upgrade",
-				"requester_actor_id": c.OwnerAgent,
+				"requester_actor_id": requesterID,
 				"requested_tier":     tier,
 				"company_name":       company,
 				"justification":      justification,

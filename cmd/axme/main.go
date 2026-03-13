@@ -63,16 +63,17 @@ type clientConfig struct {
 }
 
 type runtime struct {
-	cfgFile      string
-	cfg          *appConfig
-	secretStore  secretStore
-	httpClient   *http.Client
-	outputJSON   bool
-	contextName  string
-	overrideBase string
-	overrideKey  string
-	overrideJWT  string
-	overrideOrg  string
+	cfgFile       string
+	cfg           *appConfig
+	secretStore   secretStore
+	httpClient    *http.Client
+	streamClient  *http.Client // no timeout — used for SSE long-polling streams
+	outputJSON    bool
+	contextName   string
+	overrideBase  string
+	overrideKey   string
+	overrideJWT   string
+	overrideOrg   string
 	overrideWs   string
 	overrideOwn  string
 	overrideEnv  string
@@ -109,6 +110,10 @@ func run() int {
 		httpClient: &http.Client{
 			Timeout: 25 * time.Second,
 		},
+		// streamClient has no Timeout so SSE long-polls are not cut off by the
+		// client after 25 s. Individual stream calls pass a context with cancel
+		// (Ctrl-C) as the only cancellation mechanism.
+		streamClient: &http.Client{},
 	}
 	secretStore, err := initSecretStore(cfgFile)
 	if err != nil {
@@ -172,6 +177,7 @@ func buildRoot(rt *runtime) *cobra.Command {
 		newLogsCmd(rt),
 		newTraceCmd(rt),
 		newAgentsCmd(rt),
+		newScenariosCmd(rt),
 		newServiceAccountsCmd(rt),
 		newKeysCmd(rt),
 		newStatusCmd(rt),
@@ -434,40 +440,64 @@ func newWhoamiCmd(rt *runtime) *cobra.Command {
 				out["owner_agent"] = ctx.OwnerAgent
 			}
 
-			var serverContextHint string
-			if personalContext, err := rt.personalContextFromServer(cmd.Context(), ctx); err == nil {
-				out["server_context"] = asMap(personalContext["context"])
-				if account := asMap(personalContext["account"]); len(account) > 0 {
-					out["account"] = account
+			// If using an API key (service account context), show agent addresses.
+			if ctx.APIKey != "" && ctx.OrgID != "" && ctx.WorkspaceID != "" {
+				query := map[string]string{"org_id": ctx.OrgID, "workspace_id": ctx.WorkspaceID}
+				if saStatus, saBody, _, saErr := rt.request(cmd.Context(), ctx, "GET", "/v1/service-accounts", query, nil, true); saErr == nil && saStatus < 400 {
+					accounts := asSlice(saBody["service_accounts"])
+					addrs := make([]string, 0, len(accounts))
+					for _, raw := range accounts {
+						a := asMap(raw)
+						if addr := asString(a["agent_address"]); addr != "" {
+							addrs = append(addrs, addr)
+						}
+					}
+					if len(addrs) > 0 {
+						out["agent_addresses"] = addrs
+					}
 				}
-				if selectedOrg := asMap(personalContext["selected_organization"]); len(selectedOrg) > 0 {
-					out["selected_organization"] = selectedOrg
-				}
-				if selectedWorkspace := asMap(personalContext["selected_workspace"]); len(selectedWorkspace) > 0 {
-					out["selected_workspace"] = selectedWorkspace
-				}
-				if guidance := asMap(personalContext["guidance"]); len(guidance) > 0 {
-					out["server_guidance"] = guidance
-				}
-				status := asMap(out["status"])
-				status["account_signed_in"] = true
-				status["workspace_attached"] = len(asMap(personalContext["selected_workspace"])) > 0
-				status["membership_count"] = len(asSlice(personalContext["workspaces"]))
-				out["status"] = status
+			}
+
+		var serverContextHint string
+		serverSessionValid := false
+		if personalContext, err := rt.personalContextFromServer(cmd.Context(), ctx); err == nil {
+			serverSessionValid = true
+			out["server_context"] = asMap(personalContext["context"])
+			if account := asMap(personalContext["account"]); len(account) > 0 {
+				out["account"] = account
+			}
+			if selectedOrg := asMap(personalContext["selected_organization"]); len(selectedOrg) > 0 {
+				out["selected_organization"] = selectedOrg
+			}
+			if selectedWorkspace := asMap(personalContext["selected_workspace"]); len(selectedWorkspace) > 0 {
+				out["selected_workspace"] = selectedWorkspace
+			}
+			if guidance := asMap(personalContext["guidance"]); len(guidance) > 0 {
+				out["server_guidance"] = guidance
+			}
+			status := asMap(out["status"])
+			status["account_signed_in"] = true
+			status["workspace_attached"] = len(asMap(personalContext["selected_workspace"])) > 0
+			status["membership_count"] = len(asSlice(personalContext["workspaces"]))
+			out["status"] = status
+		} else {
+			// Update status to reflect that the server session is invalid.
+			status := asMap(out["status"])
+			status["has_account_session"] = false
+			out["status"] = status
+			// Only include hint in JSON output; human output prints it inline below.
+			serverContextHint = sessionExpiredMessage()
+			out["hint"] = serverContextHint
+		}
+			if ctx.resolvedActorToken() != "" && serverSessionValid {
+			sessions, err := rt.listAccountSessions(cmd.Context(), ctx, false)
+			if err == nil {
+				out["sessions"] = sessions
+				out["session_summary"] = accountSessionSummary(sessions, false)
 			} else {
-				// Only include hint in JSON output; human output prints it inline below.
-				serverContextHint = "Not signed in — run `axme login` to connect your account."
-				out["hint"] = serverContextHint
+				out["sessions_error"] = err.Error()
 			}
-			if ctx.resolvedActorToken() != "" {
-				sessions, err := rt.listAccountSessions(cmd.Context(), ctx, false)
-				if err == nil {
-					out["sessions"] = sessions
-					out["session_summary"] = accountSessionSummary(sessions, false)
-				} else {
-					out["sessions_error"] = err.Error()
-				}
-			}
+		}
 
 			if rt.outputJSON {
 				return rt.printJSON(out)
@@ -487,6 +517,16 @@ func newWhoamiCmd(rt *runtime) *cobra.Command {
 			if ctx.OwnerAgent != "" {
 				fmt.Printf("Owner agent:   %s\n", ctx.OwnerAgent)
 			}
+			if addrs, ok := out["agent_addresses"].([]string); ok && len(addrs) > 0 {
+				if len(addrs) == 1 {
+					fmt.Printf("Agent address: %s\n", addrs[0])
+				} else {
+					fmt.Printf("Agent addresses:\n")
+					for _, a := range addrs {
+						fmt.Printf("  %s\n", a)
+					}
+				}
+			}
 			fmt.Printf("Environment:   %s\n", ctx.Environment)
 			fmt.Println()
 
@@ -495,7 +535,7 @@ func newWhoamiCmd(rt *runtime) *cobra.Command {
 			} else {
 				fmt.Println("Workspace access: none (run `axme login`)")
 			}
-			if asBool(status["has_account_session"]) {
+			if serverSessionValid {
 				fmt.Println("Account session:  active")
 				if account := asMap(out["account"]); len(account) > 0 {
 					if email := asString(account["email"]); email != "" {
@@ -503,9 +543,9 @@ func newWhoamiCmd(rt *runtime) *cobra.Command {
 					}
 				}
 			} else {
-				fmt.Println("Account session:  none")
+				fmt.Println("Account session:  expired")
 				fmt.Println()
-				fmt.Println("  Run `axme login` to sign in with your email address.")
+				fmt.Println("  " + sessionExpiredMessage())
 			}
 			if serverContextHint == "" {
 				if selectedWS := asMap(out["selected_workspace"]); len(selectedWS) > 0 {
@@ -1341,8 +1381,33 @@ func newContextCmd(rt *runtime) *cobra.Command {
 				if guidance := asMap(personalContext["guidance"]); len(guidance) > 0 {
 					out["server_guidance"] = guidance
 				}
-			} else {
-				out["server_context_error"] = err.Error()
+		} else {
+			// Keep a short error in the JSON output for scripting; emit a human-readable
+			// warning to stderr when running interactively (non-JSON mode).
+			out["server_context_error"] = "session expired — run `axme login` to refresh"
+			out["session_expired"] = true
+			if !rt.outputJSON {
+				fmt.Fprintf(os.Stderr, "\nWarning: %s\n\n", sessionExpiredMessage())
+				delete(out, "server_context_error")
+				delete(out, "session_expired")
+			}
+		}
+			// When in SA (API key) context, show derived agent addresses.
+			if c.APIKey != "" && c.OrgID != "" && c.WorkspaceID != "" {
+				query := map[string]string{"org_id": c.OrgID, "workspace_id": c.WorkspaceID}
+				if saStatus, saBody, _, saErr := rt.request(cmd.Context(), c, "GET", "/v1/service-accounts", query, nil, true); saErr == nil && saStatus < 400 {
+					accounts := asSlice(saBody["service_accounts"])
+					addrs := make([]string, 0, len(accounts))
+					for _, raw := range accounts {
+						a := asMap(raw)
+						if addr := asString(a["agent_address"]); addr != "" {
+							addrs = append(addrs, addr)
+						}
+					}
+					if len(addrs) > 0 {
+						out["agent_addresses"] = addrs
+					}
+				}
 			}
 			return rt.printGeneric(out)
 		},
@@ -1545,7 +1610,7 @@ func newRunCmd(rt *runtime) *cobra.Command {
 
 func newIntentsCmd(rt *runtime) *cobra.Command {
 	cmd := &cobra.Command{Use: "intents", Aliases: []string{"intent"}, Short: "Durable execution intents"}
-	cmd.AddCommand(newIntentsListCmd(rt), newIntentsGetCmd(rt), newIntentsWatchCmd(rt), newIntentsCancelCmd(rt), newIntentsRetryCmd(rt), newIntentsResumeCmd(rt))
+	cmd.AddCommand(newIntentsListCmd(rt), newIntentsGetCmd(rt), newIntentsWatchCmd(rt), newIntentsCancelCmd(rt), newIntentsRetryCmd(rt), newIntentsResumeCmd(rt), newIntentsSendCmd(rt))
 	return cmd
 }
 
@@ -1571,7 +1636,7 @@ func newIntentsListCmd(rt *runtime) *cobra.Command {
 					return &cliError{Code: 1, Msg: "failed to list inbox threads"}
 				}
 				if status == 401 || strings.Contains(detail, "token") || strings.Contains(detail, "bearer") {
-					return &cliError{Code: 1, Msg: "Authentication failed. Run `axme login` to sign in."}
+					return &cliError{Code: 1, Msg: sessionExpiredMessage()}
 				}
 				return &cliError{Code: 1, Msg: fmt.Sprintf("failed to list inbox threads: %s", detail)}
 			}
@@ -1740,6 +1805,71 @@ func newIntentsResumeCmd(rt *runtime) *cobra.Command {
 	}
 }
 
+func newIntentsSendCmd(rt *runtime) *cobra.Command {
+	var toAddress string
+	var intentType string
+	var service string
+	var dataJSON string
+	cmd := &cobra.Command{
+		Use:   "send",
+		Short: "Send an intent to an agent address",
+		Long: `Send a durable intent to a registered agent address.
+
+The --to flag accepts a full agent:// address, e.g.:
+  axme intents send --to agent://acme-corp/production/approver --service approval.v1
+
+The from_agent is derived automatically from the API key (service account context).`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if toAddress == "" {
+				return &cliError{Code: 2, Msg: "--to is required (e.g. --to agent://org/workspace/agent-name)"}
+			}
+			if !strings.HasPrefix(toAddress, "agent://") {
+				return &cliError{Code: 2, Msg: fmt.Sprintf("--to must be a full agent:// address, got: %q", toAddress)}
+			}
+			payload := map[string]any{
+				"to_agent":       toAddress,
+				"intent_type":    intentType,
+				"correlation_id": uuid.NewString(),
+			}
+			if service != "" {
+				payload["payload"] = map[string]any{"service": service}
+			}
+			if dataJSON != "" {
+				var extra map[string]any
+				if err := json.Unmarshal([]byte(dataJSON), &extra); err != nil {
+					return &cliError{Code: 2, Msg: "invalid --data-json: must be a JSON object"}
+				}
+				if existing, ok := payload["payload"].(map[string]any); ok {
+					for k, v := range extra {
+						existing[k] = v
+					}
+				} else {
+					payload["payload"] = extra
+				}
+			}
+			ctx := rt.effectiveContext()
+			status, body, _, err := rt.request(cmd.Context(), ctx, "POST", "/v1/intents", nil, payload, true)
+			if err != nil {
+				return err
+			}
+			intentID := asNestedString(body, "intent_id")
+			runLink := strings.TrimRight(ctx.BaseURL, "/") + "/v1/intents/" + intentID
+			return rt.printResult(status, map[string]any{
+				"ok":        status < 400,
+				"intent_id": intentID,
+				"to_agent":  toAddress,
+				"run_link":  runLink,
+				"body":      body,
+			})
+		},
+	}
+	cmd.Flags().StringVar(&toAddress, "to", "", "destination agent address (agent://org/workspace/name)")
+	cmd.Flags().StringVar(&intentType, "intent-type", "intent.ask.v1", "intent type")
+	cmd.Flags().StringVar(&service, "service", "", "payload.service label")
+	cmd.Flags().StringVar(&dataJSON, "data-json", "", "extra payload fields as JSON object")
+	return cmd
+}
+
 func newLogsCmd(rt *runtime) *cobra.Command {
 	var tail int
 	var level, step, since string
@@ -1855,141 +1985,174 @@ func newTraceCmd(rt *runtime) *cobra.Command {
 }
 
 func newAgentsCmd(rt *runtime) *cobra.Command {
-	cmd := &cobra.Command{Use: "agents", Aliases: []string{"agent"}, Short: "Registry/agent operations"}
-	cmd.AddCommand(newAgentsListCmd(rt), newAgentsRegisterCmd(rt), newAgentsResolveCmd(rt))
+	cmd := &cobra.Command{Use: "agents", Aliases: []string{"agent"}, Short: "Agent address registry operations"}
+	cmd.AddCommand(newAgentsListCmd(rt), newAgentsShowCmd(rt), newAgentsRegisterCmd(rt))
 	return cmd
 }
 
 func newAgentsListCmd(rt *runtime) *cobra.Command {
 	var limit int
+	var orgID, workspaceID string
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List agents (alias-backed)",
+		Short: "List registered agent addresses in a workspace",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := rt.effectiveContext()
-			if ctx.OrgID == "" || ctx.WorkspaceID == "" {
-				return &cliError{Code: 2, Msg: "org_id and workspace_id are required in context for agents list"}
+			resolvedOrgID := orgID
+			if resolvedOrgID == "" {
+				resolvedOrgID = ctx.OrgID
 			}
-			query := map[string]string{"org_id": ctx.OrgID, "workspace_id": ctx.WorkspaceID, "limit": strconv.Itoa(max(1, limit))}
-			status, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/aliases", query, nil, true)
+			resolvedWorkspaceID := workspaceID
+			if resolvedWorkspaceID == "" {
+				resolvedWorkspaceID = ctx.WorkspaceID
+			}
+			if resolvedOrgID == "" || resolvedWorkspaceID == "" {
+				return &cliError{Code: 2, Msg: "org_id and workspace_id are required (use --org-id/--workspace-id or set in context)"}
+			}
+			query := map[string]string{
+				"org_id":       resolvedOrgID,
+				"workspace_id": resolvedWorkspaceID,
+				"limit":        strconv.Itoa(max(1, limit)),
+			}
+			status, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/agents", query, nil, true)
 			if err != nil {
 				return err
+			}
+			if status >= 400 {
+				return rt.printResult(status, body)
 			}
 			if rt.outputJSON {
 				return rt.printResult(status, body)
 			}
-			aliases := asSlice(body["aliases"])
-			rows := make([]map[string]any, 0, len(aliases))
-			for _, raw := range aliases {
+			agents := asSlice(body["agents"])
+			rows := make([]map[string]any, 0, len(agents))
+			for _, raw := range agents {
 				a := asMap(raw)
-				rows = append(rows, map[string]any{"alias": a["alias"], "principal_id": a["principal_id"], "status": a["status"], "type": a["alias_type"]})
+				rows = append(rows, map[string]any{
+					"address":      asString(a["address"]),
+					"display_name": asString(a["display_name"]),
+					"status":       asString(a["status"]),
+					"created_at":   asString(a["created_at"]),
+				})
 			}
-			printTable([]string{"ALIAS", "PRINCIPAL_ID", "STATUS", "TYPE"}, rows, []string{"alias", "principal_id", "status", "type"})
+			printTable([]string{"ADDRESS", "DISPLAY_NAME", "STATUS", "CREATED_AT"}, rows, []string{"address", "display_name", "status", "created_at"})
 			return nil
 		},
 	}
-	cmd.Flags().IntVar(&limit, "limit", 100, "max aliases")
+	cmd.Flags().IntVar(&limit, "limit", 100, "max results")
+	cmd.Flags().StringVar(&orgID, "org-id", "", "organization id (defaults to context org_id)")
+	cmd.Flags().StringVar(&workspaceID, "workspace-id", "", "workspace id (defaults to context workspace_id)")
 	return cmd
 }
 
-func newAgentsRegisterCmd(rt *runtime) *cobra.Command {
-	var name, capability, publicKey, transport, endpointURL, authMode, region, clusterID, failoverPolicy string
-	var priority int
-	cmd := &cobra.Command{
-		Use:   "register",
-		Short: "Register agent principal + alias (+ optional route)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := rt.effectiveContext()
-			if ctx.OrgID == "" || ctx.WorkspaceID == "" {
-				return &cliError{Code: 2, Msg: "org_id and workspace_id are required in context"}
-			}
-			if name == "" {
-				return &cliError{Code: 2, Msg: "--name is required"}
-			}
-			prPayload := map[string]any{
-				"org_id":         ctx.OrgID,
-				"workspace_id":   ctx.WorkspaceID,
-				"principal_type": "service_agent",
-				"display_name":   name,
-				"metadata": map[string]any{
-					"capability": capability,
-					"public_key": publicKey,
-				},
-			}
-			_, prBody, _, err := rt.request(cmd.Context(), ctx, "POST", "/v1/principals", nil, prPayload, true)
-			if err != nil {
-				return err
-			}
-			principal := asMap(prBody["principal"])
-			principalID := asString(principal["principal_id"])
-			aliasPayload := map[string]any{
-				"principal_id": principalID,
-				"alias":        name,
-				"alias_type":   "service",
-				"metadata":     map[string]any{"capability": capability},
-			}
-			_, aliasBody, _, err := rt.request(cmd.Context(), ctx, "POST", "/v1/aliases", nil, aliasPayload, true)
-			if err != nil {
-				return err
-			}
-			result := map[string]any{"ok": true, "principal": prBody["principal"], "alias": aliasBody["alias"]}
-			if endpointURL != "" {
-				routePayload := map[string]any{
-					"principal_id":    principalID,
-					"transport_type":  transport,
-					"endpoint_url":    endpointURL,
-					"auth_mode":       authMode,
-					"region":          region,
-					"cluster_id":      clusterID,
-					"failover_policy": failoverPolicy,
-					"priority":        priority,
-				}
-				_, routeBody, _, rerr := rt.request(cmd.Context(), ctx, "POST", "/v1/routing/endpoints", nil, routePayload, true)
-				if rerr != nil {
-					return rerr
-				}
-				result["route"] = routeBody["route"]
-			}
-			return rt.printGeneric(result)
-		},
-	}
-	cmd.Flags().StringVar(&name, "name", "", "agent alias name")
-	cmd.Flags().StringVar(&capability, "capability", "", "agent capability label")
-	cmd.Flags().StringVar(&publicKey, "public-key", "", "agent public key")
-	cmd.Flags().StringVar(&transport, "transport", "http", "transport type")
-	cmd.Flags().StringVar(&endpointURL, "endpoint-url", "", "routing endpoint url (optional)")
-	cmd.Flags().StringVar(&authMode, "auth-mode", "jwt", "auth mode")
-	cmd.Flags().StringVar(&region, "region", "", "region")
-	cmd.Flags().StringVar(&clusterID, "cluster-id", "", "cluster id")
-	cmd.Flags().StringVar(&failoverPolicy, "failover-policy", "none", "failover policy")
-	cmd.Flags().IntVar(&priority, "priority", 100, "route priority")
-	return cmd
-}
-
-func newAgentsResolveCmd(rt *runtime) *cobra.Command {
+func newAgentsShowCmd(rt *runtime) *cobra.Command {
 	return &cobra.Command{
-		Use:   "resolve <name_or_alias>",
-		Short: "Resolve agent alias and route",
+		Use:   "show <address>",
+		Short: "Show agent address details (e.g. agent://acme-corp/production/approver)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := rt.effectiveContext()
-			if ctx.OrgID == "" || ctx.WorkspaceID == "" {
-				return &cliError{Code: 2, Msg: "org_id and workspace_id are required in context"}
-			}
-			alias := args[0]
-			query := map[string]string{"org_id": ctx.OrgID, "workspace_id": ctx.WorkspaceID, "alias": alias}
-			_, aliasBody, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/aliases/resolve", query, nil, true)
+			address := args[0]
+			// Strip agent:// prefix for the URL path since the server accepts both forms.
+			pathPart := strings.TrimPrefix(address, "agent://")
+			status, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/agents/"+pathPart, nil, nil, true)
 			if err != nil {
 				return err
 			}
-			routePayload := map[string]any{"org_id": ctx.OrgID, "workspace_id": ctx.WorkspaceID, "alias": alias}
-			_, routeBody, _, err := rt.request(cmd.Context(), ctx, "POST", "/v1/routing/resolve", nil, routePayload, true)
-			if err != nil {
-				return err
-			}
-			return rt.printGeneric(map[string]any{"ok": true, "alias_resolution": aliasBody["resolution"], "route_resolution": routeBody["resolution"]})
+			return rt.printResult(status, body)
 		},
 	}
+}
+
+func newAgentsRegisterCmd(rt *runtime) *cobra.Command {
+	var name, displayName, description string
+	var orgID, workspaceID string
+
+	cmd := &cobra.Command{
+		Use:   "register",
+		Short: "Register a new agent (creates a service account with an agent:// address)",
+		Long: `Register a new agent in your workspace.
+
+An agent is a service account with an automatically assigned address of the form:
+  agent://{org-slug}/{workspace-slug}/{name-slug}
+
+The agent address can be used as a destination in 'axme intents send --to agent://...'.
+A service account key is not created automatically — use 'axme service-accounts keys create'
+to generate an API key for the new agent.`,
+		Example: `  axme agents register --name "approver"
+  axme agents register --name "data-pipeline" --display-name "Data Pipeline Bot"`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if strings.TrimSpace(name) == "" {
+				return fmt.Errorf("--name is required")
+			}
+			c := rt.effectiveContext()
+			resolvedOrgID := orgID
+			if resolvedOrgID == "" {
+				resolvedOrgID = c.OrgID
+			}
+			resolvedWorkspaceID := workspaceID
+			if resolvedWorkspaceID == "" {
+				resolvedWorkspaceID = c.WorkspaceID
+			}
+			if resolvedOrgID == "" || resolvedWorkspaceID == "" {
+				return fmt.Errorf("org_id and workspace_id are required (set in context with 'axme whoami' or pass --org-id/--workspace-id)")
+			}
+
+			payload := map[string]any{
+				"org_id":       resolvedOrgID,
+				"workspace_id": resolvedWorkspaceID,
+				"name":         strings.TrimSpace(name),
+			}
+			if d := strings.TrimSpace(displayName); d != "" {
+				payload["display_name"] = d
+			}
+			if d := strings.TrimSpace(description); d != "" {
+				payload["description"] = d
+			}
+
+			status, body, raw, err := rt.request(cmd.Context(), c, "POST", "/v1/service-accounts", nil, payload, true)
+			if err != nil {
+				return err
+			}
+			if status >= 400 {
+				return fmt.Errorf("%s", httpErrorMessage(status, raw))
+			}
+			if rt.outputJSON {
+				fmt.Println(raw)
+				return nil
+			}
+
+			sa := asMap(body["service_account"])
+			address := asString(sa["agent_address"])
+			saID := asString(sa["service_account_id"])
+			saName := asString(sa["name"])
+
+			fmt.Printf("Agent registered.\n\n")
+			fmt.Printf("  Name:            %s\n", saName)
+			fmt.Printf("  Service account: %s\n", saID)
+			if address != "" {
+				fmt.Printf("  Agent address:   %s\n", address)
+			} else {
+				fmt.Println("  Agent address:   (not assigned — org/workspace slugs may not be set yet)")
+			}
+			fmt.Println()
+			fmt.Println("Next: create an API key for this agent:")
+			fmt.Printf("  axme service-accounts keys create --service-account-id %s\n", saID)
+			if address != "" {
+				fmt.Println()
+				fmt.Println("Send an intent to this agent:")
+				fmt.Printf("  axme intents send --to %s --service your-service.v1\n", address)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", "", "Agent name (used to derive the address slug) — required")
+	cmd.Flags().StringVar(&displayName, "display-name", "", "Human-readable display name")
+	cmd.Flags().StringVar(&description, "description", "", "Optional description")
+	cmd.Flags().StringVar(&orgID, "org-id", "", "Organization ID (defaults to context org_id)")
+	cmd.Flags().StringVar(&workspaceID, "workspace-id", "", "Workspace ID (defaults to context workspace_id)")
+	_ = cmd.MarkFlagRequired("name")
+	return cmd
 }
 
 func newKeysCmd(rt *runtime) *cobra.Command {
@@ -2149,7 +2312,7 @@ func newServiceAccountsCreateCmd(rt *runtime) *cobra.Command {
 				return rt.serviceAccountsAPIError(status, body, raw)
 			}
 			serviceAccount := asMap(body["service_account"])
-			return rt.printGeneric(map[string]any{
+			out := map[string]any{
 				"ok":              true,
 				"org_id":          resolvedOrgID,
 				"workspace_id":    resolvedWorkspaceID,
@@ -2160,7 +2323,16 @@ func newServiceAccountsCreateCmd(rt *runtime) *cobra.Command {
 					resolvedWorkspaceID,
 					asString(serviceAccount["service_account_id"]),
 				),
-			})
+			}
+			if addr := asString(serviceAccount["agent_address"]); addr != "" {
+				out["agent_address"] = addr
+				out["guidance_message"] = fmt.Sprintf(
+					"Service account created. Agent address: %s\nRun `axme service-accounts keys create --service-account-id %s` to mint a key.",
+					addr,
+					asString(serviceAccount["service_account_id"]),
+				)
+			}
+			return rt.printGeneric(out)
 		},
 	}
 	cmd.Flags().StringVar(&orgID, "org-id", "", "organization id (defaults to context org_id)")
@@ -2565,7 +2737,7 @@ func (rt *runtime) streamEvents(ctx context.Context, c *clientConfig, intentID s
 		return since, err
 	}
 	rt.applyAuthHeaders(req, c)
-	resp, err := rt.httpClient.Do(req)
+	resp, err := rt.streamClient.Do(req)
 	if err != nil {
 		return since, err
 	}
@@ -2575,6 +2747,9 @@ func (rt *runtime) streamEvents(ctx context.Context, c *clientConfig, intentID s
 		return since, &cliError{Code: 1, Msg: fmt.Sprintf("stream failed: %s", string(raw))}
 	}
 	sc := bufio.NewScanner(resp.Body)
+	// Default MaxScanTokenSize is 64 KB. Increase to 1 MB to handle large
+	// event payloads (e.g. intents with large embedded results).
+	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	lineEvent := ""
 	lineData := ""
 	lineID := since
@@ -2598,7 +2773,11 @@ func (rt *runtime) streamEvents(ctx context.Context, c *clientConfig, intentID s
 			if rt.outputJSON {
 				_ = rt.printJSON(payload)
 			} else {
-				fmt.Printf("[%v] %v status=%v waiting=%v\n", payload["at"], payload["event_type"], payload["status"], payload["waiting_reason"])
+				line := fmt.Sprintf("[%v] %v status=%v", payload["at"], payload["event_type"], payload["status"])
+				if wr := asString(payload["waiting_reason"]); wr != "" {
+					line += " waiting=" + wr
+				}
+				fmt.Println(line)
 			}
 		}
 		lineEvent, lineData, lineID = "", "", 0
@@ -2632,8 +2811,20 @@ func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path st
 	// one-time-use token triggers reuse-detection on the server and invalidates the
 	// entire session.
 	proactiveRefreshed := false
-	if c.RefreshToken != "" && c.resolvedActorToken() != "" {
-		if secs := jwtSecondsUntilExpiry(c.resolvedActorToken()); secs >= 0 && secs < 60 {
+	if c.RefreshToken != "" {
+		// Refresh proactively if the actor token is absent (empty/cleared) or
+		// expires within 5 minutes (300 s). The wider window reduces the chance
+		// of an in-flight token expiry and eliminates the reactive 401 round-trip
+		// in the common case.
+		//
+		// Previously this only triggered when resolvedActorToken() was non-empty,
+		// which meant an already-expired (cleared) token never got refreshed
+		// proactively — the request went out without a bearer, hit a 401, and the
+		// reactive path consumed the one-time-use refresh token without the
+		// proactive path having a chance to save the rotated token first.
+		actorToken := c.resolvedActorToken()
+		secs := jwtSecondsUntilExpiry(actorToken)
+		if actorToken == "" || (secs >= 0 && secs < 300) {
 			_, _ = rt.tryRefreshActorToken(ctx, c)
 			proactiveRefreshed = true
 		}
@@ -2642,19 +2833,36 @@ func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path st
 	if err != nil {
 		return status, body, raw, err
 	}
-	// Auto-refresh: if we get 401 with an expired/invalid actor token and have a refresh token, try once.
-	// Skip if we already did a proactive refresh above to avoid double-consuming the one-time-use token.
-	if status == 401 && !proactiveRefreshed && c.RefreshToken != "" && c.resolvedActorToken() != "" {
+	// Auto-refresh: if we get 401 with an expired/invalid/missing actor token and
+	// have a refresh token, try once.
+	// Skip if we already did a proactive refresh above to avoid double-consuming
+	// the one-time-use token.
+	if status == 401 && !proactiveRefreshed && c.RefreshToken != "" {
 		code := asString(asMap(body["error"])["code"])
 		detail := asString(body["detail"])
-		isTokenError := code == "token_expired" || code == "invalid_actor_token" ||
-			strings.Contains(raw, "token_expired") || strings.Contains(raw, "expired") ||
-			strings.Contains(detail, "invalid access token") || strings.Contains(detail, "invalid actor token") ||
+		// missing_actor_token: server required a bearer but got none — our local JWT
+		// may be absent or the session was invalidated server-side.
+		// invalid_actor_token / token_expired: token present but rejected.
+		isTokenError := code == "token_expired" ||
+			code == "invalid_actor_token" ||
+			code == "missing_actor_token" ||
+			strings.Contains(raw, "token_expired") ||
+			strings.Contains(raw, "expired") ||
+			strings.Contains(detail, "invalid access token") ||
+			strings.Contains(detail, "invalid actor token") ||
+			strings.Contains(detail, "missing actor token") ||
 			(strings.Contains(detail, "token") && strings.Contains(detail, "invalid"))
 		if isTokenError {
 			if newToken, refreshErr := rt.tryRefreshActorToken(ctx, c); refreshErr == nil && newToken != "" {
 				// Retry with the fresh token
 				return rt.doRequest(ctx, c, method, path, query, payload, expectJSON)
+			}
+			// Refresh failed — convert to a clear, actionable error so callers don't
+			// have to parse the raw 401 body.  Return it as a cliError so the top-level
+			// error handler prints it cleanly without a stack trace.
+			return 401, body, raw, &cliError{
+				Code: 2,
+				Msg:  sessionExpiredMessage(),
 			}
 		}
 	}
@@ -2719,11 +2927,21 @@ func (rt *runtime) tryRefreshActorToken(ctx context.Context, c *clientConfig) (s
 	// (c is a value-copy of the context, not the stored pointer).
 	if rt.secretStore != nil {
 		contextName := rt.activeContextName()
-		_ = rt.secretStore.Save(contextName, storedContextSecrets{
+		if saveErr := rt.secretStore.Save(contextName, storedContextSecrets{
 			APIKey:       c.APIKey,
 			ActorToken:   c.resolvedActorToken(),
 			RefreshToken: c.RefreshToken,
-		})
+		}); saveErr != nil {
+			// If persisting the rotated refresh token fails, the stale token
+			// remains on disk. On the next CLI invocation it will be rejected
+			// as already-used, triggering reuse-detection and killing the
+			// session. Warn loudly so the user can re-login proactively.
+			fmt.Fprintf(os.Stderr,
+				"\n[warning] Could not persist new refresh token: %v\n"+
+					"          Your session may expire on next launch — run `axme login` to refresh it.\n\n",
+				saveErr,
+			)
+		}
 		// Also propagate into cfg so persistConfig stays consistent.
 		if stored := rt.cfg.Contexts[contextName]; stored != nil {
 			stored.setActorToken(newToken)
@@ -2779,11 +2997,10 @@ func (rt *runtime) doRequest(ctx context.Context, c *clientConfig, method, path 
 	rawBody, _ := io.ReadAll(resp.Body)
 	rawStr := string(rawBody)
 	out := map[string]any{}
-	if expectJSON && len(rawBody) > 0 {
-		_ = json.Unmarshal(rawBody, &out)
-	} else if !expectJSON && len(rawBody) > 0 && len(rawBody) < 4096 {
-		// Always try to parse error responses as JSON regardless of expectJSON,
-		// so that auto-refresh and error handling can inspect error codes.
+	if len(rawBody) > 0 {
+		// Always attempt JSON parsing: success bodies need structured access
+		// (e.g. quota show reads nested overview.quota_policy which can exceed
+		// 4 KB), and error bodies need code inspection for auto-refresh logic.
 		_ = json.Unmarshal(rawBody, &out)
 	}
 	return resp.StatusCode, out, rawStr, nil
@@ -2791,6 +3008,17 @@ func (rt *runtime) doRequest(ctx context.Context, c *clientConfig, method, path 
 
 func personalContextRequirementMessage(detail string) string {
 	return "This command requires an account session. Run `axme login` to sign in, then try again."
+}
+
+// sessionExpiredMessage returns a consistent, actionable message when the actor
+// session has expired or been invalidated and cannot be refreshed automatically.
+func sessionExpiredMessage() string {
+	return "Your session has expired. Run `axme login` to sign in again.\n" +
+		"\n" +
+		"After logging in, export your API key:\n" +
+		"  export AXME_API_KEY=$(axme context show --show-key --json | jq -r .api_key)\n" +
+		"\n" +
+		"Then run your command again."
 }
 
 // httpErrorMessage converts a non-2xx HTTP status and raw response body into a
@@ -2816,9 +3044,9 @@ func httpErrorMessage(status int, raw string) string {
 	code := parsed.Error.Code
 	switch {
 	case status == 401 && (code == "missing_actor_token" || code == "missing_api_key" || code == "unauthorized"):
-		return "Not authenticated. Run `axme login` to sign in."
+		return "Session required. Run `axme login` to sign in, then try again."
 	case status == 401:
-		return "Authentication failed. Run `axme login` to sign in."
+		return sessionExpiredMessage()
 	case status == 403:
 		return "Permission denied. You may not have the required role for this action."
 	case status == 404:
@@ -2838,7 +3066,7 @@ func httpErrorMessage(status int, raw string) string {
 			if d.ResetAt != "" {
 				msg += fmt.Sprintf(" Resets at %s.", d.ResetAt)
 			}
-			msg += "\nRun `axme quota show` to check your limits, or `axme quota upgrade-request` to request higher limits."
+			msg += "\nRun `axme quota show` to check your limits, or email hello@axme.ai to request higher limits."
 			return msg
 		}
 		return "Rate limit exceeded. Please wait before retrying."
@@ -2872,7 +3100,7 @@ func (rt *runtime) personalContextFromServer(ctx context.Context, c *clientConfi
 		case status == 401 && errorCode == "missing_actor_token":
 			return nil, &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
 		case status == 401 && errorCode == "invalid_actor_token":
-			return nil, &cliError{Code: 2, Msg: "Your account session token is invalid or expired. Run `axme login` to refresh it."}
+			return nil, &cliError{Code: 2, Msg: sessionExpiredMessage()}
 		case status == 403 && (errorCode == "invalid_actor_scope" || strings.Contains(strings.ToLower(detail), "actor identity")):
 			return nil, &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
 		case status == 404 && strings.Contains(strings.ToLower(detail), "not bound to an organization/workspace context"):
@@ -3232,7 +3460,7 @@ func (rt *runtime) personalWorkspaceSelectionAPIError(status int, body map[strin
 	case status == 401 && errorCode == "missing_actor_token":
 		return &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
 	case status == 401 && errorCode == "invalid_actor_token":
-		return &cliError{Code: 2, Msg: "Your account session token is invalid or expired. Run `axme login` to refresh it."}
+		return &cliError{Code: 2, Msg: sessionExpiredMessage()}
 	case status == 403 && strings.Contains(strings.ToLower(detail), "outside actor membership scope"):
 		return &cliError{Code: 2, Msg: "That workspace is not part of your account membership inventory. Run `axme workspace list` to see available workspaces, then try again."}
 	case status == 403 && (errorCode == "invalid_actor_scope" || strings.Contains(strings.ToLower(detail), "actor identity")):
@@ -3265,7 +3493,7 @@ func (rt *runtime) enterpriseMembersAPIError(status int, body map[string]any, ra
 	case status == 401 && errorCode == "missing_actor_token":
 		return &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
 	case status == 401 && errorCode == "invalid_actor_token":
-		return &cliError{Code: 2, Msg: "Your account session token is invalid or expired. Run `axme login` to refresh it."}
+		return &cliError{Code: 2, Msg: sessionExpiredMessage()}
 	case status == 403 && (strings.Contains(strings.ToLower(detail), "outside actor membership scope") ||
 		strings.Contains(strings.ToLower(detail), "workspace_id does not match target workspace_id") ||
 		strings.Contains(strings.ToLower(detail), "membership scope")):
@@ -3276,6 +3504,8 @@ func (rt *runtime) enterpriseMembersAPIError(status int, body map[string]any, ra
 		return &cliError{Code: 2, Msg: detail}
 	case status == 422 && strings.TrimSpace(detail) != "":
 		return &cliError{Code: 2, Msg: detail}
+	case status == 429:
+		return &cliError{Code: 1, Msg: httpErrorMessage(status, raw)}
 	default:
 		return fmt.Errorf("enterprise member request returned %d: %s", status, raw)
 	}
@@ -3293,7 +3523,7 @@ func (rt *runtime) serviceAccountsAPIError(status int, body map[string]any, raw 
 	case status == 401 && errorCode == "missing_actor_token":
 		return &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
 	case status == 401 && errorCode == "invalid_actor_token":
-		return &cliError{Code: 2, Msg: "Your account session token is invalid or expired. Run `axme login` to refresh it."}
+		return &cliError{Code: 2, Msg: sessionExpiredMessage()}
 	case status == 401 && errorCode == "missing_platform_api_key":
 		return &cliError{Code: 2, Msg: serviceAccountPlatformAPIKeyRequirementMessage(detail)}
 	case status == 403 && (strings.Contains(strings.ToLower(detail), "outside actor membership scope") ||
@@ -3306,6 +3536,8 @@ func (rt *runtime) serviceAccountsAPIError(status int, body map[string]any, raw 
 		return &cliError{Code: 2, Msg: detail}
 	case status == 422 && strings.TrimSpace(detail) != "":
 		return &cliError{Code: 2, Msg: detail}
+	case status == 429:
+		return &cliError{Code: 1, Msg: httpErrorMessage(status, raw)}
 	default:
 		return fmt.Errorf("service account request returned %d: %s", status, raw)
 	}
@@ -3995,22 +4227,20 @@ func builtInExamples() map[string]map[string]any {
 		"approval-resume": {
 			"intent_type":    "intent.ask.v1",
 			"correlation_id": uuid.NewString(),
-			"from_agent":     "agent://alpha/requester",
-			"to_agent":       "agent://alpha/reviewer",
+			"to_agent":       "agent://acme-corp/production/approver",
 			"payload": map[string]any{
 				"service":  "demo.approval",
-				"tags":     []string{"alpha", "approval"},
+				"tags":     []string{"demo", "approval"},
 				"question": "Please approve onboarding action",
 			},
 		},
 		"tool-waiting": {
 			"intent_type":    "intent.ask.v1",
 			"correlation_id": uuid.NewString(),
-			"from_agent":     "agent://alpha/requester",
-			"to_agent":       "agent://alpha/tool-runner",
+			"to_agent":       "agent://acme-corp/production/tool-runner",
 			"payload": map[string]any{
 				"service":  "demo.tool",
-				"tags":     []string{"alpha", "tool"},
+				"tags":     []string{"demo", "tool"},
 				"question": "Run external tool and resume",
 			},
 		},
