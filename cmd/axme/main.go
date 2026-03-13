@@ -178,6 +178,7 @@ func buildRoot(rt *runtime) *cobra.Command {
 		newTraceCmd(rt),
 		newAgentsCmd(rt),
 		newScenariosCmd(rt),
+		newTasksCmd(rt),
 		newServiceAccountsCmd(rt),
 		newKeysCmd(rt),
 		newStatusCmd(rt),
