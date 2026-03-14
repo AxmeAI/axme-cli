@@ -78,6 +78,7 @@ type scenarioAgentEntry struct {
 	Address         string `json:"address"`
 	DisplayName     string `json:"display_name,omitempty"`
 	DeliveryMode    string `json:"delivery_mode,omitempty"`
+	CallbackURL     string `json:"callback_url,omitempty"`
 	CreateIfMissing bool   `json:"create_if_missing,omitempty"`
 }
 
@@ -398,31 +399,51 @@ func scenariosClientSideApply(rt *runtime, cmd *cobra.Command, bundle scenarioBu
 			}
 			if hasLocalKey {
 				watchTag("agent:ready", fmt.Sprintf("%s  (sa_id=%s, key cached)", agent.Address, existingSAID))
-				continue
-			}
-			// Create a new key for existing SA
-			kStatus, kBody, _, kErr := rt.request(
-				cmd.Context(), ctx,
-				"POST", "/v1/service-accounts/"+existingSAID+"/keys",
-				nil, map[string]interface{}{}, true,
-			)
-			if kErr != nil || kStatus >= 400 {
-				watchTag("system", fmt.Sprintf("warning: could not create key for %s: %s", agent.Address, asString(kBody["detail"])))
 			} else {
-				keyObj := asMap(kBody["key"])
-				creds := scenarioAgentCreds{
-					Address:          agent.Address,
-					ServiceAccountID: existingSAID,
-					KeyID:            asString(keyObj["key_id"]),
-					APIKey:           asString(keyObj["token"]),
-					CreatedAt:        asString(keyObj["created_at"]),
+				// Create a new key for existing SA
+				kStatus, kBody, _, kErr := rt.request(
+					cmd.Context(), ctx,
+					"POST", "/v1/service-accounts/"+existingSAID+"/keys",
+					nil, map[string]interface{}{}, true,
+				)
+				if kErr != nil || kStatus >= 400 {
+					watchTag("system", fmt.Sprintf("warning: could not create key for %s: %s", agent.Address, asString(kBody["detail"])))
+				} else {
+					keyObj := asMap(kBody["key"])
+					creds := scenarioAgentCreds{
+						Address:          agent.Address,
+						ServiceAccountID: existingSAID,
+						KeyID:            asString(keyObj["key_id"]),
+						APIKey:           asString(keyObj["token"]),
+						CreatedAt:        asString(keyObj["created_at"]),
+					}
+					if existingAddress != "" {
+						creds.Address = existingAddress
+					}
+					upsertScenarioAgent(&agentsStore, creds)
+					storeChanged = true
+					watchTag("agent:ready", fmt.Sprintf("%s  (sa_id=%s, new key created)", agent.Address, existingSAID))
 				}
-				if existingAddress != "" {
-					creds.Address = existingAddress
+			}
+			// Apply delivery config if specified (even for existing SA)
+			if agent.DeliveryMode != "" || agent.CallbackURL != "" {
+				deliveryPayload := map[string]interface{}{}
+				if agent.DeliveryMode != "" {
+					deliveryPayload["delivery_mode"] = agent.DeliveryMode
 				}
-				upsertScenarioAgent(&agentsStore, creds)
-				storeChanged = true
-				watchTag("agent:ready", fmt.Sprintf("%s  (sa_id=%s, new key created)", agent.Address, existingSAID))
+				if agent.CallbackURL != "" {
+					deliveryPayload["callback_url"] = agent.CallbackURL
+				}
+				dStatus, dBody, _, dErr := rt.request(
+					cmd.Context(), ctx,
+					"PATCH", "/v1/service-accounts/"+existingSAID+"/delivery",
+					nil, deliveryPayload, true,
+				)
+				if dErr != nil || dStatus >= 400 {
+					watchTag("system", fmt.Sprintf("warning: could not set delivery config for %s: %s", agent.Address, asString(dBody["detail"])))
+				} else if agent.CallbackURL != "" {
+					watchTag("agent:delivery", fmt.Sprintf("%s  mode=%s  callback=%s", agent.Address, agent.DeliveryMode, agent.CallbackURL))
+				}
 			}
 			continue
 		}
@@ -475,6 +496,31 @@ func scenariosClientSideApply(rt *runtime, cmd *cobra.Command, bundle scenarioBu
 			upsertScenarioAgent(&agentsStore, creds)
 			storeChanged = true
 			watchTag("agent:create", fmt.Sprintf("%s  (sa_id=%s)", addrToStore, saID))
+		}
+
+		// Set delivery config if delivery_mode or callback_url specified
+		if agent.DeliveryMode != "" || agent.CallbackURL != "" {
+			deliveryPayload := map[string]interface{}{}
+			if agent.DeliveryMode != "" {
+				deliveryPayload["delivery_mode"] = agent.DeliveryMode
+			}
+			if agent.CallbackURL != "" {
+				deliveryPayload["callback_url"] = agent.CallbackURL
+			}
+			dStatus, dBody, _, dErr := rt.request(
+				cmd.Context(), ctx,
+				"PATCH", "/v1/service-accounts/"+saID+"/delivery",
+				nil, deliveryPayload, true,
+			)
+			if dErr != nil || dStatus >= 400 {
+				watchTag("system", fmt.Sprintf("warning: could not set delivery config for %s: %s", agent.Address, asString(dBody["detail"])))
+			} else {
+				if agent.CallbackURL != "" {
+					watchTag("agent:delivery", fmt.Sprintf("%s  mode=%s  callback_url=%s", agent.Address, agent.DeliveryMode, agent.CallbackURL))
+				} else {
+					watchTag("agent:delivery", fmt.Sprintf("%s  mode=%s", agent.Address, agent.DeliveryMode))
+				}
+			}
 		}
 	}
 
