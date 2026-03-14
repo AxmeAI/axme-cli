@@ -746,7 +746,11 @@ func watchDivider() {
 }
 
 func watchTag(kind, msg string) {
-	fmt.Printf("  [%-*s]  %s\n", _tagWidth, kind, msg)
+	pad := _tagWidth - len(kind)
+	if pad < 0 {
+		pad = 0
+	}
+	fmt.Printf("  [%s]%s:  %s\n", kind, strings.Repeat(" ", pad), msg)
 }
 
 func watchFmtStatus(raw, reason string) string {
