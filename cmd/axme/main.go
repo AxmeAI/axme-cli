@@ -48,6 +48,7 @@ type appConfig struct {
 	ActiveContext         string                   `json:"active_context"`
 	Contexts             map[string]*clientConfig `json:"contexts"`
 	FileStoreNoticeSeen  bool                     `json:"file_store_notice_seen,omitempty"`
+	LastLoginEmail       string                   `json:"last_login_email,omitempty"`
 }
 
 type clientConfig struct {
@@ -4489,6 +4490,7 @@ func saveConfig(path string, cfg *appConfig) error {
 		ActiveContext:        cfg.ActiveContext,
 		Contexts:             map[string]*clientConfig{},
 		FileStoreNoticeSeen:  cfg.FileStoreNoticeSeen,
+		LastLoginEmail:       cfg.LastLoginEmail,
 	}
 	for name, c := range cfg.Contexts {
 		if c == nil {

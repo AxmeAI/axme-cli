@@ -210,6 +210,11 @@ func (rt *runtime) runEmailLogin(ctx context.Context, ctxName string) error {
 		}
 	}
 
+	// Remember email for next login
+	if rt.cfg != nil {
+		rt.cfg.LastLoginEmail = email
+	}
+
 	if err := rt.persistConfig(); err != nil {
 		return err
 	}
@@ -266,8 +271,16 @@ func (rt *runtime) runEmailLogin(ctx context.Context, ctxName string) error {
 }
 
 func (rt *runtime) promptEmail() (string, error) {
+	lastEmail := ""
+	if rt.cfg != nil {
+		lastEmail = strings.TrimSpace(rt.cfg.LastLoginEmail)
+	}
 	if !rt.outputJSON {
-		fmt.Fprint(os.Stderr, "  Enter your email address: ")
+		if lastEmail != "" {
+			fmt.Fprintf(os.Stderr, "  Email [%s]: ", lastEmail)
+		} else {
+			fmt.Fprint(os.Stderr, "  Enter your email address: ")
+		}
 	}
 	reader := bufio.NewReader(os.Stdin)
 	line, err := reader.ReadString('\n')
@@ -275,6 +288,9 @@ func (rt *runtime) promptEmail() (string, error) {
 		return "", fmt.Errorf("login: could not read email: %w", err)
 	}
 	email := strings.TrimSpace(line)
+	if email == "" && lastEmail != "" {
+		email = lastEmail
+	}
 	if email == "" {
 		return "", fmt.Errorf("login: email is required")
 	}
