@@ -1652,7 +1652,7 @@ func newRunCmd(rt *runtime) *cobra.Command {
 
 func newIntentsCmd(rt *runtime) *cobra.Command {
 	cmd := &cobra.Command{Use: "intents", Aliases: []string{"intent"}, Short: "Durable execution intents"}
-	cmd.AddCommand(newIntentsListCmd(rt), newIntentsGetCmd(rt), newIntentsWatchCmd(rt), newIntentsCancelCmd(rt), newIntentsRetryCmd(rt), newIntentsResumeCmd(rt), newIntentsSendCmd(rt))
+	cmd.AddCommand(newIntentsListCmd(rt), newIntentsGetCmd(rt), newIntentsWatchCmd(rt), newIntentsCancelCmd(rt), newIntentsRetryCmd(rt), newIntentsResumeCmd(rt), newIntentsSendCmd(rt), newIntentsLogCmd(rt))
 	return cmd
 }
 
@@ -1910,6 +1910,126 @@ The from_agent is derived automatically from the API key (service account contex
 	cmd.Flags().StringVar(&service, "service", "", "payload.service label")
 	cmd.Flags().StringVar(&dataJSON, "data-json", "", "extra payload fields as JSON object")
 	return cmd
+}
+
+func newIntentsLogCmd(rt *runtime) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "log <intent_id>",
+		Short: "Show intent execution log in watch format",
+		Long: `Replay the full lifecycle of an intent using the same visual format as --watch.
+
+Shows every status transition, step dispatch, and holder change from the
+server-side audit trail, in chronological order.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			intentID := args[0]
+			ctx := rt.effectiveContext()
+
+			_, ibody, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/intents/"+intentID, nil, nil, true)
+			if err != nil {
+				return err
+			}
+			intent := asMap(ibody["intent"])
+
+			_, ebody, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/intents/"+intentID+"/events", nil, nil, true)
+			if err != nil {
+				return err
+			}
+			events := asSlice(ebody["events"])
+
+			intentType := asString(intent["intent_type"])
+			finalStatus := strings.ToUpper(asString(intent["status"]))
+
+			watchDivider()
+			fmt.Printf("  axme intents log  ·  %s\n", intentID)
+			watchDivider()
+			if intentType != "" {
+				fmt.Printf("  Type: %s\n", intentType)
+			}
+			fmt.Println()
+
+			prevStatus := ""
+			prevHolder := ""
+			for _, raw := range events {
+				ev := asMap(raw)
+				status := strings.ToUpper(asString(ev["status"]))
+				evType := asString(ev["event_type"])
+				at := asString(ev["at"])
+				if len(at) > 19 {
+					at = at[:19]
+				}
+				at = strings.ReplaceAll(at, "T", " ")
+
+				holder := ""
+				if pw := asMap(ev["pending_with"]); pw != nil {
+					name := asString(pw["name"])
+					if name == "" {
+						name = asString(pw["ref"])
+					}
+					parts := strings.Split(name, "/")
+					holder = parts[len(parts)-1]
+				}
+
+				reason := asString(ev["waiting_reason"])
+
+				// status change
+				if status != "" && status != prevStatus {
+					fmtNew := watchFmtStatus(status, reason)
+					fmtPrev := prevStatus
+					if fmtPrev == "" {
+						fmtPrev = "—"
+					} else {
+						fmtPrev = watchFmtStatus(prevStatus, "")
+					}
+					watchTagAt(at, "status:change", fmt.Sprintf("%s  →  %s", fmtPrev, fmtNew))
+					prevStatus = status
+				}
+
+				// holder change
+				if holder != "" && holder != prevHolder {
+					watchTagAt(at, "cur_holder", holder)
+					prevHolder = holder
+				}
+
+				// special events
+				switch {
+				case strings.Contains(evType, "human_task"):
+					watchTagAt(at, "human:task", "human task assigned — awaiting approval")
+				case strings.Contains(evType, "reminder"):
+					watchTagAt(at, "reminder", fmt.Sprintf("reminder sent (event: %s)", evType))
+				case strings.Contains(evType, "escalat"):
+					watchTagAt(at, "escalation", fmt.Sprintf("escalated (event: %s)", evType))
+				case strings.Contains(evType, "delivery_failed"):
+					watchTagAt(at, "delivery:failed", fmt.Sprintf("delivery failed (event: %s)", evType))
+				case strings.Contains(evType, "timed_out"):
+					watchTagAt(at, "timeout", "TIMED_OUT — deadline exceeded")
+				}
+			}
+
+			fmt.Println()
+			watchDivider()
+			fmt.Println()
+			fmtFinal := watchFmtStatus(finalStatus, "")
+			fmt.Printf("  Final status:  %s\n", fmtFinal)
+			fmt.Printf("  Intent ID:     %s\n", intentID)
+			fmt.Printf("  Events:        %d\n", len(events))
+			fmt.Println()
+			return nil
+		},
+	}
+	return cmd
+}
+
+func watchTagAt(at, kind, msg string) {
+	pad := _tagWidth - len(kind)
+	if pad < 0 {
+		pad = 0
+	}
+	if at != "" {
+		fmt.Printf("  [%s]%s:  %-19s  %s\n", kind, strings.Repeat(" ", pad), at, msg)
+	} else {
+		fmt.Printf("  [%s]%s:  %s\n", kind, strings.Repeat(" ", pad), msg)
+	}
 }
 
 func newLogsCmd(rt *runtime) *cobra.Command {
