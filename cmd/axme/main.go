@@ -45,9 +45,10 @@ type cliError struct {
 func (e *cliError) Error() string { return e.Msg }
 
 type appConfig struct {
-	ActiveContext         string                   `json:"active_context"`
+	ActiveContext        string                   `json:"active_context"`
 	Contexts             map[string]*clientConfig `json:"contexts"`
 	FileStoreNoticeSeen  bool                     `json:"file_store_notice_seen,omitempty"`
+	LastLoginEmail       string                   `json:"last_login_email,omitempty"`
 }
 
 type clientConfig struct {
@@ -502,6 +503,7 @@ func newWhoamiCmd(rt *runtime) *cobra.Command {
 
 		var serverContextHint string
 		serverSessionValid := false
+		portalFeatureDisabled := false
 		if personalContext, err := rt.personalContextFromServer(cmd.Context(), ctx); err == nil {
 			serverSessionValid = true
 			out["server_context"] = asMap(personalContext["context"])
@@ -522,6 +524,23 @@ func newWhoamiCmd(rt *runtime) *cobra.Command {
 			status["workspace_attached"] = len(asMap(personalContext["selected_workspace"])) > 0
 			status["membership_count"] = len(asSlice(personalContext["workspaces"]))
 			out["status"] = status
+		} else if err == errPortalFeatureDisabled {
+			// Portal API is disabled on this deployment, but the actor token
+			// may still be valid. Check JWT expiry locally to determine
+			// whether to show the session as active.
+			portalFeatureDisabled = true
+			if jwtSecondsUntilExpiry(ctx.resolvedActorToken()) > 0 {
+				serverSessionValid = true
+				status := asMap(out["status"])
+				status["account_signed_in"] = true
+				out["status"] = status
+			} else {
+				status := asMap(out["status"])
+				status["has_account_session"] = false
+				out["status"] = status
+				serverContextHint = sessionExpiredMessage()
+				out["hint"] = serverContextHint
+			}
 		} else {
 			// Update status to reflect that the server session is invalid.
 			status := asMap(out["status"])
@@ -578,7 +597,11 @@ func newWhoamiCmd(rt *runtime) *cobra.Command {
 				fmt.Println("Workspace access: none (run `axme login`)")
 			}
 			if serverSessionValid {
-				fmt.Println("Account session:  active")
+				if portalFeatureDisabled {
+					fmt.Println("Account session:  active (portal unavailable)")
+				} else {
+					fmt.Println("Account session:  active")
+				}
 				if account := asMap(out["account"]); len(account) > 0 {
 					if email := asString(account["email"]); email != "" {
 						fmt.Printf("Account email:    %s\n", email)
@@ -3280,6 +3303,12 @@ func httpErrorMessage(status int, raw string) string {
 	}
 }
 
+// errPortalFeatureDisabled is returned by personalContextFromServer when the
+// portal API is not enabled on this deployment. The actor token may still be
+// valid — callers should check token expiry locally rather than treating this
+// as a session-expired condition.
+var errPortalFeatureDisabled = fmt.Errorf("portal feature disabled")
+
 func (rt *runtime) personalContextFromServer(ctx context.Context, c *clientConfig) (map[string]any, error) {
 	status, body, raw, err := rt.request(ctx, c, "GET", "/v1/portal/personal/context", nil, nil, true)
 	if err != nil {
@@ -3293,15 +3322,18 @@ func (rt *runtime) personalContextFromServer(ctx context.Context, c *clientConfi
 		if detail == "" {
 			detail = errorMessage
 		}
+		detailLower := strings.ToLower(detail)
 		switch {
 		case status == 401 && errorCode == "missing_actor_token":
 			return nil, &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
 		case status == 401 && errorCode == "invalid_actor_token":
 			return nil, &cliError{Code: 2, Msg: sessionExpiredMessage()}
-		case status == 403 && (errorCode == "invalid_actor_scope" || strings.Contains(strings.ToLower(detail), "actor identity")):
+		case status == 403 && (errorCode == "invalid_actor_scope" || strings.Contains(detailLower, "actor identity")):
 			return nil, &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
-		case status == 404 && strings.Contains(strings.ToLower(detail), "not bound to an organization/workspace context"):
+		case status == 404 && strings.Contains(detailLower, "not bound to an organization/workspace context"):
 			return nil, &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
+		case strings.Contains(detailLower, "enterprise feature") && strings.Contains(detailLower, "disabled"):
+			return nil, errPortalFeatureDisabled
 		}
 		return nil, fmt.Errorf("personal context returned %d: %s", status, raw)
 	}
@@ -4369,6 +4401,7 @@ func saveConfig(path string, cfg *appConfig) error {
 		ActiveContext:        cfg.ActiveContext,
 		Contexts:             map[string]*clientConfig{},
 		FileStoreNoticeSeen:  cfg.FileStoreNoticeSeen,
+		LastLoginEmail:       cfg.LastLoginEmail,
 	}
 	for name, c := range cfg.Contexts {
 		if c == nil {
