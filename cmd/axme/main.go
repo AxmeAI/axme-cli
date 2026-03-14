@@ -45,8 +45,9 @@ type cliError struct {
 func (e *cliError) Error() string { return e.Msg }
 
 type appConfig struct {
-	ActiveContext string                   `json:"active_context"`
-	Contexts      map[string]*clientConfig `json:"contexts"`
+	ActiveContext         string                   `json:"active_context"`
+	Contexts             map[string]*clientConfig `json:"contexts"`
+	FileStoreNoticeSeen  bool                     `json:"file_store_notice_seen,omitempty"`
 }
 
 type clientConfig struct {
@@ -121,8 +122,14 @@ func run() int {
 		return 1
 	}
 	rt.secretStore = secretStore
-	if warning := secretStorageFallbackWarning(rt.secretStore); warning != "" {
-		fmt.Fprintln(os.Stderr, warning)
+	// Show the file-store notice only once (on first use).
+	if notice := secretStorageFallbackWarning(rt.secretStore); notice != "" {
+		if !rt.cfg.FileStoreNoticeSeen {
+			fmt.Fprintln(os.Stderr, notice)
+			rt.cfg.FileStoreNoticeSeen = true
+			// Best-effort save; ignore error here — the main command will still run.
+			_ = saveConfig(cfgFile, rt.cfg)
+		}
 	}
 	// Start background version check before executing the command so the
 	// network request runs concurrently with the actual command.
@@ -201,10 +208,15 @@ func newLoginCmd(rt *runtime) *cobra.Command {
 	var useAlphaBootstrap bool
 	var noBrowser bool
 	var onboardingURL string
+	var forceReauth bool
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Sign in to your AXME account",
 		Long: `Sign in to AXME using your email address.
+
+If your session is still active (valid refresh token), credentials are refreshed
+silently without sending a new email code. Use --force to always start a new
+sign-in flow regardless of existing session state.
 
 A one-time code will be sent to your email. Enter it at the prompt to complete
 sign-in. Your credentials are stored securely for future CLI commands.
@@ -283,6 +295,34 @@ Use --browser to use the legacy browser-based approval flow instead.`,
 				return nil
 			}
 
+			// Load stored secrets so that RefreshToken is available.
+			_ = rt.loadSecretsIntoContext(ctxName, accountCtx)
+
+			// Try silent token refresh before starting OTP flow.
+			// Skip if --force is set or if there is no refresh token.
+			if !forceReauth && accountCtx.RefreshToken != "" {
+				if newToken, refreshErr := rt.tryRefreshActorToken(cmd.Context(), accountCtx); refreshErr == nil && newToken != "" {
+					if err := rt.persistConfig(); err != nil {
+						return err
+					}
+					if rt.outputJSON {
+						return rt.printJSON(map[string]any{"ok": true, "context": ctxName, "method": "refresh", "refreshed": true})
+					}
+					fmt.Fprintln(os.Stderr)
+					fmt.Fprintln(os.Stderr, "  Session refreshed. Already signed in.")
+					if accountCtx.OrgID != "" {
+						fmt.Fprintf(os.Stderr, "  org_id:       %s\n", accountCtx.OrgID)
+					}
+					if accountCtx.WorkspaceID != "" {
+						fmt.Fprintf(os.Stderr, "  workspace_id: %s\n", accountCtx.WorkspaceID)
+					}
+					fmt.Fprintln(os.Stderr, "  Use --force to start a new sign-in flow.")
+					fmt.Fprintln(os.Stderr)
+					return nil
+				}
+				// Refresh failed — fall through to OTP flow
+			}
+
 			// Default: email-first OTP flow
 			if interactiveInputAvailable() {
 				return rt.runEmailLogin(cmd.Context(), ctxName)
@@ -313,6 +353,7 @@ Use --browser to use the legacy browser-based approval flow instead.`,
 	cmd.Flags().BoolVar(&useAlphaBootstrap, "bootstrap-alpha", false, "legacy alpha bootstrap flow")
 	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't try to open browser automatically (only relevant with --browser)")
 	cmd.Flags().StringVar(&onboardingURL, "onboarding-url", defaultAlphaOnboardingURL, "CLI onboarding page URL")
+	cmd.Flags().BoolVar(&forceReauth, "force", false, "Force a new sign-in even if a valid session already exists")
 	_ = cmd.Flags().MarkHidden("web")
 	_ = cmd.Flags().MarkHidden("bootstrap-alpha")
 	_ = cmd.Flags().MarkHidden("onboarding-url")
@@ -1986,8 +2027,105 @@ func newTraceCmd(rt *runtime) *cobra.Command {
 }
 
 func newAgentsCmd(rt *runtime) *cobra.Command {
-	cmd := &cobra.Command{Use: "agents", Aliases: []string{"agent"}, Short: "Agent address registry operations"}
-	cmd.AddCommand(newAgentsListCmd(rt), newAgentsShowCmd(rt), newAgentsRegisterCmd(rt))
+	cmd := &cobra.Command{Use: "agents", Aliases: []string{"agent"}, Short: "Manage agents (service accounts with agent:// addresses)"}
+	cmd.AddCommand(
+		newAgentsListCmd(rt),
+		newAgentsShowCmd(rt),
+		newAgentsRegisterCmd(rt),
+		newAgentsDeleteCmd(rt),
+		newAgentsKeysCmd(rt),
+	)
+	return cmd
+}
+
+func newAgentsKeysCmd(rt *runtime) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "keys",
+		Short: "Manage API keys for an agent",
+	}
+	cmd.AddCommand(newAgentsKeysCreateCmd(rt), newAgentsKeysRevokeCmd(rt))
+	return cmd
+}
+
+func newAgentsKeysCreateCmd(rt *runtime) *cobra.Command {
+	var serviceAccountID, expiresAt string
+	cmd := &cobra.Command{
+		Use:     "create",
+		Short:   "Create an API key for an agent",
+		Example: `  axme agents keys create --agent-id sa_abc123`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if serviceAccountID == "" {
+				return &cliError{Code: 2, Msg: "--agent-id is required"}
+			}
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
+			payload := map[string]any{}
+			if expiresAt != "" {
+				payload["expires_at"] = expiresAt
+			}
+			status, body, raw, err := rt.request(cmd.Context(), ctx, "POST", "/v1/service-accounts/"+serviceAccountID+"/keys", nil, payload, true)
+			if err != nil {
+				return err
+			}
+			if status >= 400 {
+				return rt.serviceAccountsAPIError(status, body, raw)
+			}
+			keyObj := asMap(body["key"])
+			if rt.outputJSON {
+				return rt.printGeneric(map[string]any{"ok": true, "key": keyObj})
+			}
+			fmt.Printf("  API key created.\n\n")
+			fmt.Printf("  key_id:    %s\n", asString(keyObj["key_id"]))
+			fmt.Printf("  api_key:   %s\n", asString(keyObj["token"]))
+			fmt.Printf("  hint:      %s...\n", asString(keyObj["key_hint"]))
+			if exp := asString(keyObj["expires_at"]); exp != "" {
+				fmt.Printf("  expires:   %s\n", exp)
+			}
+			fmt.Println()
+			fmt.Println("  Store this key now — it is only returned once.")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&serviceAccountID, "agent-id", "", "Service account ID (from `axme agents list`)")
+	cmd.Flags().StringVar(&expiresAt, "expires-at", "", "Optional ISO8601 expiry timestamp")
+	_ = cmd.MarkFlagRequired("agent-id")
+	return cmd
+}
+
+func newAgentsKeysRevokeCmd(rt *runtime) *cobra.Command {
+	var serviceAccountID, keyID string
+	cmd := &cobra.Command{
+		Use:     "revoke",
+		Short:   "Revoke an API key for an agent",
+		Example: `  axme agents keys revoke --agent-id sa_abc123 --key-id sak_xyz`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if serviceAccountID == "" || keyID == "" {
+				return &cliError{Code: 2, Msg: "--agent-id and --key-id are required"}
+			}
+			ctx, err := rt.effectiveContextWithSecrets()
+			if err != nil {
+				return err
+			}
+			status, body, raw, err := rt.request(cmd.Context(), ctx, "POST", "/v1/service-accounts/"+serviceAccountID+"/keys/"+keyID+"/revoke", nil, nil, true)
+			if err != nil {
+				return err
+			}
+			if status >= 400 {
+				return rt.serviceAccountsAPIError(status, body, raw)
+			}
+			if rt.outputJSON {
+				return rt.printGeneric(map[string]any{"ok": true, "key": asMap(body["key"])})
+			}
+			fmt.Printf("  Key %s revoked.\n", keyID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&serviceAccountID, "agent-id", "", "Service account ID")
+	cmd.Flags().StringVar(&keyID, "key-id", "", "Key ID to revoke")
+	_ = cmd.MarkFlagRequired("agent-id")
+	_ = cmd.MarkFlagRequired("key-id")
 	return cmd
 }
 
@@ -2138,7 +2276,7 @@ to generate an API key for the new agent.`,
 			}
 			fmt.Println()
 			fmt.Println("Next: create an API key for this agent:")
-			fmt.Printf("  axme service-accounts keys create --service-account-id %s\n", saID)
+			fmt.Printf("  axme agents keys create --agent-id %s\n", saID)
 			if address != "" {
 				fmt.Println()
 				fmt.Println("Send an intent to this agent:")
@@ -2156,11 +2294,63 @@ to generate an API key for the new agent.`,
 	return cmd
 }
 
+func newAgentsDeleteCmd(rt *runtime) *cobra.Command {
+	var yes bool
+
+	cmd := &cobra.Command{
+		Use:   "delete <service-account-id>",
+		Short: "Delete an agent (service account) and revoke all its keys",
+		Long: `Delete an agent by its service account ID. All active API keys for this agent
+are revoked before deletion. This action cannot be undone.
+
+Use 'axme agents list' to find the service account ID.`,
+		Example: `  axme agents delete sa_abc123
+  axme agents delete sa_abc123 --yes`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			saID := strings.TrimSpace(args[0])
+			if saID == "" {
+				return fmt.Errorf("service-account-id is required")
+			}
+
+			if !yes && !rt.outputJSON {
+				fmt.Fprintf(os.Stderr, "  Delete agent %q and revoke all its keys? [y/N]: ", saID)
+				reader := bufio.NewReader(os.Stdin)
+				line, _ := reader.ReadString('\n')
+				if strings.ToLower(strings.TrimSpace(line)) != "y" {
+					fmt.Fprintln(os.Stderr, "  Aborted.")
+					return nil
+				}
+			}
+
+			ctx := rt.effectiveContext()
+			status, body, raw, err := rt.request(cmd.Context(), ctx, "DELETE", "/v1/service-accounts/"+saID, nil, nil, true)
+			if err != nil {
+				return err
+			}
+			if status >= 400 {
+				return fmt.Errorf("%s", httpErrorMessage(status, raw))
+			}
+			if rt.outputJSON {
+				fmt.Println(raw)
+				return nil
+			}
+			_ = body
+			fmt.Printf("  Agent %s deleted.\n", saID)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompt")
+	return cmd
+}
+
 func newKeysCmd(rt *runtime) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "keys",
-		Short: "Legacy alias for service-account key operations",
-		Long:  "Legacy alias for `axme service-accounts ...`. Prefer `axme service-accounts list` and `axme service-accounts keys ...` for the guided account-level flow.",
+		Use:        "keys",
+		Short:      "Deprecated: use `axme agents keys` instead",
+		Long:       "Deprecated: use `axme agents keys` instead. This command group will be removed in a future release.",
+		Hidden:     true,
+		Deprecated: "use `axme agents keys` instead",
 	}
 	cmd.AddCommand(newKeysListCmd(rt), newKeysCreateCmd(rt), newKeysRevokeCmd(rt))
 	return cmd
@@ -2168,9 +2358,12 @@ func newKeysCmd(rt *runtime) *cobra.Command {
 
 func newServiceAccountsCmd(rt *runtime) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "service-accounts",
-		Aliases: []string{"serviceaccounts", "service-account"},
-		Short:   "Manage service accounts and their keys",
+		Use:        "service-accounts",
+		Aliases:    []string{"serviceaccounts", "service-account"},
+		Short:      "Deprecated: use `axme agents` instead",
+		Long:       "Deprecated: use `axme agents` instead. This command group will be removed in a future release.",
+		Hidden:     true,
+		Deprecated: "use `axme agents` instead",
 	}
 	cmd.AddCommand(
 		newServiceAccountsListCmd(rt),
@@ -2825,7 +3018,7 @@ func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path st
 		// proactive path having a chance to save the rotated token first.
 		actorToken := c.resolvedActorToken()
 		secs := jwtSecondsUntilExpiry(actorToken)
-		if actorToken == "" || (secs >= 0 && secs < 300) {
+		if actorToken == "" || secs < 300 {
 			_, _ = rt.tryRefreshActorToken(ctx, c)
 			proactiveRefreshed = true
 		}
@@ -2905,6 +3098,9 @@ func jwtSecondsUntilExpiry(token string) int64 {
 // tryRefreshActorToken exchanges the stored refresh_token for a new access_token.
 // On success it updates c.ActorToken and persists the new secrets.
 func (rt *runtime) tryRefreshActorToken(ctx context.Context, c *clientConfig) (string, error) {
+	if strings.TrimSpace(c.RefreshToken) == "" {
+		return "", fmt.Errorf("refresh: no refresh token available")
+	}
 	// Use a minimal config without actor token to avoid sending the expired JWT
 	refreshCtx := &clientConfig{
 		BaseURL: c.BaseURL,
@@ -4170,8 +4366,9 @@ func saveConfig(path string, cfg *appConfig) error {
 		}
 	}
 	sanitized := &appConfig{
-		ActiveContext: cfg.ActiveContext,
-		Contexts:      map[string]*clientConfig{},
+		ActiveContext:        cfg.ActiveContext,
+		Contexts:             map[string]*clientConfig{},
+		FileStoreNoticeSeen:  cfg.FileStoreNoticeSeen,
 	}
 	for name, c := range cfg.Contexts {
 		if c == nil {

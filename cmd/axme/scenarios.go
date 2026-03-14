@@ -4,13 +4,70 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 )
+
+// scenarioAgentCreds stores the credentials for a provisioned scenario agent.
+type scenarioAgentCreds struct {
+	Address          string `json:"address"`
+	ServiceAccountID string `json:"service_account_id"`
+	KeyID            string `json:"key_id"`
+	APIKey           string `json:"api_key"`
+	CreatedAt        string `json:"created_at"`
+}
+
+// scenarioAgentsStore is the on-disk format of ~/.config/axme/scenario-agents.json.
+type scenarioAgentsStore struct {
+	Agents []scenarioAgentCreds `json:"agents"`
+}
+
+func scenarioAgentsStorePath() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		dir = filepath.Join(os.Getenv("HOME"), ".config")
+	}
+	return filepath.Join(dir, "axme", "scenario-agents.json")
+}
+
+func loadScenarioAgentsStore() scenarioAgentsStore {
+	data, err := os.ReadFile(scenarioAgentsStorePath())
+	if err != nil {
+		return scenarioAgentsStore{}
+	}
+	var store scenarioAgentsStore
+	_ = json.Unmarshal(data, &store)
+	return store
+}
+
+func saveScenarioAgentsStore(store scenarioAgentsStore) error {
+	path := scenarioAgentsStorePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(store, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func upsertScenarioAgent(store *scenarioAgentsStore, creds scenarioAgentCreds) {
+	for i, a := range store.Agents {
+		if a.Address == creds.Address {
+			store.Agents[i] = creds
+			return
+		}
+	}
+	store.Agents = append(store.Agents, creds)
+}
 
 // ---------------------------------------------------------------------------
 // Scenario bundle types (mirrors gateway ScenarioBundleRequest)
@@ -20,6 +77,7 @@ type scenarioAgentEntry struct {
 	Role            string `json:"role"`
 	Address         string `json:"address"`
 	DisplayName     string `json:"display_name,omitempty"`
+	DeliveryMode    string `json:"delivery_mode,omitempty"`
 	CreateIfMissing bool   `json:"create_if_missing,omitempty"`
 }
 
@@ -29,9 +87,26 @@ type scenarioHumanEntry struct {
 	DisplayName string `json:"display_name,omitempty"`
 }
 
+type scenarioWorkflowStep struct {
+	StepID               string                 `json:"step_id"`
+	ToolID               string                 `json:"tool_id"`
+	AssignedTo           string                 `json:"assigned_to,omitempty"`
+	StepDeadlineSeconds  int                    `json:"step_deadline_seconds,omitempty"`
+	Input                map[string]interface{} `json:"input,omitempty"`
+	OnSuccess            string                 `json:"on_success,omitempty"`
+	OnFailure            string                 `json:"on_failure,omitempty"`
+	RequiresApproval     *bool                  `json:"requires_approval,omitempty"`
+	HumanTask            map[string]interface{} `json:"human_task,omitempty"`
+	RemindAfterSeconds   int                    `json:"remind_after_seconds,omitempty"`
+	MaxReminders         int                    `json:"max_reminders,omitempty"`
+	EscalateTo           string                 `json:"escalate_to,omitempty"`
+}
+
 type scenarioWorkflowEntry struct {
-	MacroID    string                 `json:"macro_id,omitempty"`
-	Parameters map[string]interface{} `json:"parameters,omitempty"`
+	MacroID    string                   `json:"macro_id,omitempty"`
+	Parameters map[string]interface{}   `json:"parameters,omitempty"`
+	Steps      []scenarioWorkflowStep   `json:"steps,omitempty"`
+	EntryStep  string                   `json:"entry_step,omitempty"`
 }
 
 type scenarioIntentSettings struct {
@@ -47,6 +122,7 @@ type scenarioIntentSettings struct {
 
 type scenarioBundle struct {
 	ScenarioID  string                 `json:"scenario_id"`
+	Title       string                 `json:"title,omitempty"`
 	Description string                 `json:"description,omitempty"`
 	Agents      []scenarioAgentEntry   `json:"agents,omitempty"`
 	Humans      []scenarioHumanEntry   `json:"humans,omitempty"`
@@ -183,15 +259,24 @@ func newScenariosValidateCmd(rt *runtime) *cobra.Command {
 }
 
 // ---------------------------------------------------------------------------
-// axme scenarios apply <file.json>
+// axme scenarios apply <file.json> [--watch]
 // ---------------------------------------------------------------------------
 
 func newScenariosApplyCmd(rt *runtime) *cobra.Command {
+	var watch bool
 	var serverSide bool
+
 	cmd := &cobra.Command{
 		Use:   "apply <file.json>",
 		Short: "Provision agents, compile workflow and submit intent from a scenario bundle",
-		Args:  cobra.ExactArgs(1),
+		Long: `Provision agents (SA creation), compile workflow and submit intent.
+
+With --watch: streams the intent lifecycle in real time until terminal status.
+
+Example:
+  axme scenarios apply scenario.json
+  axme scenarios apply scenario.json --watch`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			data, err := os.ReadFile(args[0])
 			if err != nil {
@@ -204,16 +289,19 @@ func newScenariosApplyCmd(rt *runtime) *cobra.Command {
 			}
 
 			if serverSide {
-				return scenariosServerSideApply(rt, cmd, bundle)
+				return scenariosServerSideApply(rt, cmd, bundle, watch)
 			}
-			return scenariosClientSideApply(rt, cmd, bundle)
+			return scenariosClientSideApply(rt, cmd, bundle, watch)
 		},
 	}
-	cmd.Flags().BoolVar(&serverSide, "server-side", false, "Use atomic server-side apply via POST /v1/scenarios/apply")
+
+	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "Stream intent lifecycle events after submission")
+	cmd.Flags().BoolVar(&serverSide, "server-side", false, "Use server-side apply via POST /v1/scenarios/apply (deprecated)")
+	_ = cmd.Flags().MarkHidden("server-side")
 	return cmd
 }
 
-func scenariosServerSideApply(rt *runtime, cmd *cobra.Command, bundle scenarioBundle) error {
+func scenariosServerSideApply(rt *runtime, cmd *cobra.Command, bundle scenarioBundle, watch bool) error {
 	ctx := rt.effectiveContext()
 	var payload map[string]interface{}
 	data, _ := json.Marshal(bundle)
@@ -231,143 +319,487 @@ func scenariosServerSideApply(rt *runtime, cmd *cobra.Command, bundle scenarioBu
 		return &cliError{Code: 1, Msg: fmt.Sprintf("apply failed: %s", detail)}
 	}
 
-	fmt.Println("✓ Scenario applied.")
 	intentID := asString(body["intent_id"])
-	if intentID != "" {
-		fmt.Printf("  intent_id = %s\n", intentID)
-		fmt.Printf("\nTrack with:\n  axme intents get %s\n  axme intents watch %s\n", intentID, intentID)
+	watchTag("intent:create", fmt.Sprintf("intent_id=%s", intentID))
+	if compileID := asString(body["compile_id"]); compileID != "" {
+		watchTag("intent:create", fmt.Sprintf("workflow compile_id=%s", compileID))
 	}
+
+	if watch && intentID != "" {
+		return watchIntentLive(rt, cmd, intentID, &bundle)
+	}
+
+	fmt.Println()
+	fmt.Println("  Track with:")
+	fmt.Printf("    axme intents get %s\n", intentID)
+	fmt.Printf("    axme scenarios apply --watch  (re-run with --watch to stream events)\n")
 	return nil
 }
 
-func scenariosClientSideApply(rt *runtime, cmd *cobra.Command, bundle scenarioBundle) error {
+func scenariosClientSideApply(rt *runtime, cmd *cobra.Command, bundle scenarioBundle, watch bool) error {
 	ctx := rt.effectiveContext()
 
-	// Step 1/4 — Check / create agents
-	fmt.Println("[1/4] Checking agents...")
+	// Print scenario header
+	watchDivider()
+	title := bundle.Title
+	if title == "" {
+		title = bundle.ScenarioID
+	}
+	fmt.Printf("  axme scenarios apply  ·  %s\n", bundle.ScenarioID)
+	watchDivider()
+	if title != bundle.ScenarioID {
+		fmt.Printf("  %s\n", title)
+	}
+	if bundle.Description != "" {
+		fmt.Printf("  %s\n", bundle.Description)
+	}
+	fmt.Println()
+
+	// Step 1 — Provision agents (client-side: needs Bearer token for SA creation)
+	agentsStore := loadScenarioAgentsStore()
+	storeChanged := false
+
 	for _, agent := range bundle.Agents {
-		statusCode, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/service-accounts/"+agent.Address, nil, nil, true)
-		if err != nil {
-			fmt.Printf("  ?  %-36s  (error: %v)\n", agent.Address, err)
+		if !agent.CreateIfMissing {
 			continue
 		}
-		if statusCode == 200 {
-			saID := asString(asMap(body["service_account"])["sa_id"])
-			fmt.Printf("  ✓  %-36s  (exists, sa_id=%s)\n", agent.Address, saID)
-		} else if agent.CreateIfMissing {
-			fmt.Printf("  +  %-36s  (creating...)", agent.Address)
-			saPayload := map[string]interface{}{
-				"agent_address": agent.Address,
-				"display_name":  agent.DisplayName,
+		if ctx.OrgID == "" || ctx.WorkspaceID == "" {
+			watchTag("system", fmt.Sprintf("skipping SA provision for %s — run 'axme login' first", agent.Address))
+			continue
+		}
+
+		// Check if SA already exists by name
+		statusCode, body, _, err := rt.request(
+			cmd.Context(), ctx, "GET",
+			"/v1/service-accounts?org_id="+ctx.OrgID+"&workspace_id="+ctx.WorkspaceID,
+			nil, nil, true,
+		)
+		existingSAID := ""
+		existingAddress := ""
+		if err == nil && statusCode == 200 {
+			for _, raw := range asSlice(body["service_accounts"]) {
+				sa := asMap(raw)
+				if asString(sa["name"]) == agent.Address {
+					existingSAID = asString(sa["service_account_id"])
+					existingAddress = asString(sa["address"])
+					break
+				}
 			}
-			cStatus, cBody, _, cErr := rt.request(cmd.Context(), ctx, "POST", "/v1/service-accounts", nil, saPayload, true)
-			if cErr != nil || cStatus >= 400 {
-				detail := asString(cBody["detail"])
-				fmt.Printf("  ✗  (failed: %s)\n", detail)
+		}
+
+		if existingSAID != "" {
+			// Ensure we have a key stored locally
+			hasLocalKey := false
+			for _, a := range agentsStore.Agents {
+				if a.Address == agent.Address && a.APIKey != "" {
+					hasLocalKey = true
+					break
+				}
+			}
+			if hasLocalKey {
+				watchTag("agent:ready", fmt.Sprintf("%s  (sa_id=%s, key cached)", agent.Address, existingSAID))
+				continue
+			}
+			// Create a new key for existing SA
+			kStatus, kBody, _, kErr := rt.request(
+				cmd.Context(), ctx,
+				"POST", "/v1/service-accounts/"+existingSAID+"/keys",
+				nil, map[string]interface{}{}, true,
+			)
+			if kErr != nil || kStatus >= 400 {
+				watchTag("system", fmt.Sprintf("warning: could not create key for %s: %s", agent.Address, asString(kBody["detail"])))
 			} else {
-				saID := asString(asMap(cBody["service_account"])["sa_id"])
-				fmt.Printf("  ✓  (created, sa_id=%s)\n", saID)
+				keyObj := asMap(kBody["key"])
+				creds := scenarioAgentCreds{
+					Address:          agent.Address,
+					ServiceAccountID: existingSAID,
+					KeyID:            asString(keyObj["key_id"]),
+					APIKey:           asString(keyObj["token"]),
+					CreatedAt:        asString(keyObj["created_at"]),
+				}
+				if existingAddress != "" {
+					creds.Address = existingAddress
+				}
+				upsertScenarioAgent(&agentsStore, creds)
+				storeChanged = true
+				watchTag("agent:ready", fmt.Sprintf("%s  (sa_id=%s, new key created)", agent.Address, existingSAID))
 			}
+			continue
+		}
+
+		// SA does not exist — create it
+		saPayload := map[string]interface{}{
+			"name":         agent.Address,
+			"display_name": agent.DisplayName,
+			"org_id":       ctx.OrgID,
+			"workspace_id": ctx.WorkspaceID,
+		}
+		cStatus, cBody, _, cErr := rt.request(cmd.Context(), ctx, "POST", "/v1/service-accounts", nil, saPayload, true)
+		if cErr != nil || (cStatus >= 400 && cStatus != 409) {
+			watchTag("system", fmt.Sprintf("warning: could not create SA %s: %s", agent.Address, asString(cBody["detail"])))
+			continue
+		}
+		saObj := asMap(cBody["service_account"])
+		saID := asString(saObj["service_account_id"])
+		if saID == "" {
+			saID = asString(saObj["id"])
+		}
+		saAddr := asString(saObj["address"])
+
+		if saID == "" {
+			watchTag("system", fmt.Sprintf("warning: no sa_id returned for %s — skipping key creation", agent.Address))
+			continue
+		}
+
+		// Create API key
+		kStatus, kBody, _, kErr := rt.request(
+			cmd.Context(), ctx,
+			"POST", "/v1/service-accounts/"+saID+"/keys",
+			nil, map[string]interface{}{}, true,
+		)
+		if kErr != nil || kStatus >= 400 {
+			watchTag("system", fmt.Sprintf("warning: key creation failed for %s: %s", agent.Address, asString(kBody["detail"])))
 		} else {
-			fmt.Printf("  ✗  %-36s  (not found)\n", agent.Address)
+			keyObj := asMap(kBody["key"])
+			addrToStore := saAddr
+			if addrToStore == "" {
+				addrToStore = agent.Address
+			}
+			creds := scenarioAgentCreds{
+				Address:          addrToStore,
+				ServiceAccountID: saID,
+				KeyID:            asString(keyObj["key_id"]),
+				APIKey:           asString(keyObj["token"]),
+				CreatedAt:        asString(keyObj["created_at"]),
+			}
+			upsertScenarioAgent(&agentsStore, creds)
+			storeChanged = true
+			watchTag("agent:create", fmt.Sprintf("%s  (sa_id=%s)", addrToStore, saID))
 		}
 	}
 
-	// Step 2/4 — Skip tool registration (tools are registered separately)
-	fmt.Println("[2/4] Registering tools with Tool Registry...")
-	fmt.Println("  (skipped — tools are registered via 'axme tool-registry register')")
-
-	// Step 3/4 — Compile workflow
-	fmt.Println("[3/4] Compiling workflow...")
-	var compileID string
-	if bundle.Workflow != nil && bundle.Workflow.MacroID != "" {
-		compilePayload := map[string]interface{}{
-			"macro_id":   bundle.Workflow.MacroID,
-			"parameters": bundle.Workflow.Parameters,
+	if storeChanged {
+		if err := saveScenarioAgentsStore(agentsStore); err != nil {
+			watchTag("system", fmt.Sprintf("warning: could not save agent credentials: %v", err))
 		}
-		cStatus, cBody, _, cErr := rt.request(cmd.Context(), ctx, "POST", "/v1/tool-registry/macros/compile", nil, compilePayload, true)
-		if cErr != nil {
-			return &cliError{Code: 1, Msg: fmt.Sprintf("workflow compile failed: %v", cErr)}
-		}
-		if cStatus >= 400 {
-			return &cliError{Code: 1, Msg: fmt.Sprintf("workflow compile failed (HTTP %d): %s", cStatus, asString(cBody["detail"]))}
-		}
-		compileID = asString(cBody["compile_id"])
-		if compileID == "" {
-			compileID = asString(cBody["workflow_compile_id"])
-		}
-		fmt.Printf("  ✓  compile_id = %s\n", compileID)
-	} else {
-		fmt.Println("  (skipped — no macro workflow specified)")
 	}
 
-	// Step 4/4 — Submit intent
-	fmt.Println("[4/4] Submitting intent...")
-	settings := bundle.Intent
-
-	roleMap := map[string]string{}
-	for _, ag := range bundle.Agents {
-		roleMap[ag.Role] = ag.Address
+	// Print agent/human assignments
+	for _, a := range bundle.Agents {
+		label := a.DisplayName
+		if label == "" {
+			label = a.Address
+		}
+		if a.DeliveryMode != "" {
+			watchTag("agent:assign", fmt.Sprintf("%s  [%s]", label, watchFmtBinding(a.DeliveryMode)))
+		} else {
+			watchTag("agent:assign", label)
+		}
 	}
-	for _, hu := range bundle.Humans {
-		roleMap[hu.Role] = hu.Contact
+	for _, h := range bundle.Humans {
+		label := h.DisplayName
+		if label == "" {
+			label = h.Role
+		}
+		suffix := ""
+		if h.Contact != "" {
+			suffix = fmt.Sprintf("  <%s>", h.Contact)
+		}
+		watchTag("human:assign", label+suffix)
 	}
 
-	toAgent := roleMap["initiator"]
-	if toAgent == "" {
-		for _, v := range roleMap {
-			toAgent = v
+	// Submit intent via POST /v1/scenarios/apply (gateway handles compile + intent create)
+	fmt.Println()
+	watchTag("system", "compiling workflow and submitting intent…")
+
+	var rawBundle map[string]interface{}
+	{
+		d, _ := json.Marshal(bundle)
+		_ = json.Unmarshal(d, &rawBundle)
+	}
+
+	applyStatus, applyBody, _, applyErr := rt.request(cmd.Context(), ctx, "POST", "/v1/scenarios/apply", nil, rawBundle, true)
+	if applyErr != nil {
+		return &cliError{Code: 1, Msg: fmt.Sprintf("apply failed: %v", applyErr)}
+	}
+	if applyStatus >= 400 {
+		detail := asString(applyBody["detail"])
+		if detail == "" {
+			detail = fmt.Sprintf("HTTP %d", applyStatus)
+		}
+		return &cliError{Code: 1, Msg: fmt.Sprintf("apply failed: %s", detail)}
+	}
+
+	intentID := asString(applyBody["intent_id"])
+	compileID := asString(applyBody["compile_id"])
+
+	fmt.Println()
+	watchTag("intent:create", fmt.Sprintf("intent_id=%s", intentID))
+	if compileID != "" {
+		watchTag("intent:create", fmt.Sprintf("workflow compile_id=%s", compileID))
+	}
+	watchTag("status:change", "—  →  SUBMITTED")
+
+	if watch && intentID != "" {
+		return watchIntentLive(rt, cmd, intentID, &bundle)
+	}
+
+	fmt.Println()
+	watchDivider()
+	fmt.Println()
+	fmt.Println("  Track with:")
+	fmt.Printf("    axme intents get %s\n", intentID)
+	fmt.Printf("    axme scenarios apply %s --watch\n", os.Args[len(os.Args)-1])
+	fmt.Println()
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// --watch: live intent lifecycle stream
+// ---------------------------------------------------------------------------
+
+// watchIntentLive streams GET /v1/intents/{id}/events/stream and prints events
+// in the agreed terminal format until a terminal status is reached.
+func watchIntentLive(rt *runtime, cmd *cobra.Command, intentID string, bundle *scenarioBundle) error {
+	ctx := rt.effectiveContext()
+	baseURL := strings.TrimRight(ctx.BaseURL, "/")
+	apiKey := ctx.APIKey
+	if rt.overrideKey != "" {
+		apiKey = rt.overrideKey
+	}
+
+	fmt.Println()
+	watchDivider()
+	fmt.Printf("  Watching intent  %s\n", intentID)
+	watchDivider()
+	fmt.Println()
+
+	curStatus := "SUBMITTED"
+	nextSeq := 0
+	terminalStatuses := map[string]bool{
+		"COMPLETED": true, "FAILED": true, "CANCELED": true, "TIMED_OUT": true,
+	}
+
+	for {
+		url := fmt.Sprintf("%s/v1/intents/%s/events/stream?since=%d&wait_seconds=30", baseURL, intentID, nextSeq)
+		req, err := http.NewRequestWithContext(cmd.Context(), "GET", url, nil)
+		if err != nil {
+			return fmt.Errorf("watch: %w", err)
+		}
+		req.Header.Set("X-Api-Key", apiKey)
+		req.Header.Set("Accept", "text/event-stream")
+
+		resp, err := rt.streamClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("watch: connection failed: %w", err)
+		}
+
+		done, newSeq, newStatus := consumeEventStream(resp.Body, curStatus, nextSeq, terminalStatuses, bundle)
+		_ = resp.Body.Close()
+		curStatus = newStatus
+		nextSeq = newSeq
+
+		if done {
 			break
 		}
-	}
-	if toAgent == "" {
-		toAgent = "unknown"
+		// stream.timeout — reconnect immediately
 	}
 
-	intentPayload := map[string]interface{}{
-		"intent_type": settings.Type,
-		"to_agent":    toAgent,
-		"payload":     settings.Payload,
-	}
-	if compileID != "" {
-		intentPayload["workflow_compile_id"] = compileID
-	}
-	if settings.DeadlineAt != "" {
-		intentPayload["deadline_at"] = settings.DeadlineAt
-	}
-	if settings.RemindAfterSeconds > 0 {
-		intentPayload["remind_after_seconds"] = settings.RemindAfterSeconds
-	}
-	if settings.RemindIntervalSeconds > 0 {
-		intentPayload["remind_interval_seconds"] = settings.RemindIntervalSeconds
-	}
-	if settings.MaxReminders > 0 {
-		intentPayload["max_reminders"] = settings.MaxReminders
-	}
-	if settings.EscalateTo != "" {
-		intentPayload["escalate_to"] = settings.EscalateTo
-	}
-	if settings.MaxDeliveryAttempts > 0 {
-		intentPayload["max_delivery_attempts"] = settings.MaxDeliveryAttempts
-	}
-
-	iStatus, iBody, _, iErr := rt.request(cmd.Context(), ctx, "POST", "/v1/intents", nil, intentPayload, true)
-	if iErr != nil {
-		return &cliError{Code: 1, Msg: fmt.Sprintf("intent submission failed: %v", iErr)}
-	}
-	if iStatus >= 400 {
-		detail := asString(iBody["detail"])
-		return &cliError{Code: 1, Msg: fmt.Sprintf("intent submission failed (HTTP %d): %s", iStatus, detail)}
-	}
-
-	intentID := asString(iBody["intent_id"])
-	fmt.Printf("  ✓  intent_id = %s\n", intentID)
-
-	fmt.Println("\n" + strings.Repeat("─", 40))
-	fmt.Println("Scenario started. Track with:")
-	fmt.Printf("  axme intents get %s\n", intentID)
-	fmt.Printf("  axme intents watch %s\n", intentID)
+	// Final summary
+	fmt.Println()
+	watchDivider()
+	fmt.Println()
+	fmt.Printf("  Final status:  %s\n", watchFmtStatus(curStatus, ""))
+	fmt.Printf("  Intent ID:     %s\n", intentID)
+	fmt.Println()
+	fmt.Println("  Audit log:")
+	fmt.Printf("    axme intents get %s\n", intentID)
+	fmt.Println()
 	return nil
+}
+
+// consumeEventStream reads SSE events and prints them. Returns (terminal, nextSeq, lastStatus).
+func consumeEventStream(body io.Reader, curStatus string, startSeq int, terminalStatuses map[string]bool, bundle *scenarioBundle) (bool, int, string) {
+	scanner := bufio.NewScanner(body)
+	nextSeq := startSeq
+	lastStatus := curStatus
+
+	var eventType, eventData string
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if line == "" {
+			// dispatch accumulated event
+			if eventType != "" && eventData != "" {
+				if eventType == "stream.timeout" {
+					return false, nextSeq, lastStatus
+				}
+				var ev map[string]interface{}
+				if err := json.Unmarshal([]byte(eventData), &ev); err == nil {
+					terminal, newStatus := renderWatchEvent(ev, lastStatus, bundle)
+					lastStatus = newStatus
+					if terminal {
+						return true, nextSeq, lastStatus
+					}
+					if seq, ok := ev["seq"].(float64); ok {
+						nextSeq = int(seq) + 1
+					}
+				}
+			}
+			eventType = ""
+			eventData = ""
+			continue
+		}
+
+		if strings.HasPrefix(line, "event: ") {
+			eventType = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			eventData = strings.TrimPrefix(line, "data: ")
+		} else if strings.HasPrefix(line, "id: ") {
+			if n, err := strconv.Atoi(strings.TrimPrefix(line, "id: ")); err == nil {
+				nextSeq = n + 1
+			}
+		}
+	}
+	return false, nextSeq, lastStatus
+}
+
+// renderWatchEvent processes a single SSE event and prints it.
+// Returns (isTerminal, newStatus).
+func renderWatchEvent(ev map[string]interface{}, curStatus string, bundle *scenarioBundle) (bool, string) {
+	evType := asString(ev["event_type"])
+	evStatus := asString(ev["status"])
+	evReason := asString(ev["lifecycle_waiting_reason"])
+	if evReason == "" {
+		evReason = asString(ev["reason"])
+	}
+
+	terminalStatuses := map[string]bool{
+		"COMPLETED": true, "FAILED": true, "CANCELED": true, "TIMED_OUT": true,
+	}
+
+	switch evType {
+	case "intent.human_task_assigned":
+		ht := asMap(ev["human_task"])
+		title := asString(ht["title"])
+		if title == "" {
+			title = "Human approval required"
+		}
+		watchTag("system", fmt.Sprintf("human task: %s", title))
+		watchTag("status:change", fmt.Sprintf("%s  →  WAITING (for human)", watchFmtStatus(curStatus, "")))
+		return false, "WAITING"
+
+	case "intent.reminder":
+		pw := asMap(ev["pending_with"])
+		holder := watchFmtHolder(pw)
+		watchTag("reminder", fmt.Sprintf("REMINDER sent to %s", holder))
+		return false, curStatus
+
+	case "intent.escalated":
+		details := asMap(ev["details"])
+		escalatedTo := asString(details["escalated_to"])
+		watchTag("escalation", fmt.Sprintf("escalated to %s", escalatedTo))
+		return false, curStatus
+
+	case "intent.timed_out":
+		watchTag("timeout", "TIMED_OUT — deadline exceeded")
+		return true, "TIMED_OUT"
+
+	case "intent.delivery_failed":
+		details := asMap(ev["details"])
+		attempt := asString(details["delivery_attempt"])
+		watchTag("delivery:failed", fmt.Sprintf("max delivery attempts reached  (attempt=%s)", attempt))
+		return false, "FAILED"
+	}
+
+	// Status change event
+	if evStatus == "" {
+		return false, curStatus
+	}
+
+	newFmt := watchFmtStatus(evStatus, evReason)
+	if newFmt != watchFmtStatus(curStatus, "") {
+		pw := asMap(ev["pending_with"])
+		holder := watchFmtHolder(pw)
+		if holder != "" {
+			watchTag("cur_holder", holder)
+		}
+		watchTag("status:change", fmt.Sprintf("%s  →  %s", watchFmtStatus(curStatus, ""), newFmt))
+	}
+
+	if terminalStatuses[evStatus] {
+		return true, evStatus
+	}
+	return false, evStatus
+}
+
+// ---------------------------------------------------------------------------
+// Watch render helpers — matches render.py format
+// ---------------------------------------------------------------------------
+
+const _tagWidth = 20
+const _lineWidth = 74
+
+func watchDivider() {
+	fmt.Println("  " + strings.Repeat("─", _lineWidth))
+}
+
+func watchTag(kind, msg string) {
+	fmt.Printf("  [%-*s]  %s\n", _tagWidth, kind, msg)
+}
+
+func watchFmtStatus(raw, reason string) string {
+	isHuman := strings.Contains(strings.ToUpper(reason), "HUMAN")
+	waiting := "WAITING (for agent)"
+	if isHuman {
+		waiting = "WAITING (for human)"
+	}
+	m := map[string]string{
+		"CREATED":      "CREATED",
+		"SUBMITTED":    "SUBMITTED",
+		"DELIVERED":    "DELIVERED",
+		"ACKNOWLEDGED": "ACKNOWLEDGED",
+		"IN_PROGRESS":  "IN_PROGRESS",
+		"WAITING":      waiting,
+		"COMPLETED":    "COMPLETED ✓",
+		"FAILED":       "FAILED ✗",
+		"CANCELED":     "CANCELED",
+		"TIMED_OUT":    "TIMED_OUT ✗",
+	}
+	if v, ok := m[raw]; ok {
+		return v
+	}
+	return raw
+}
+
+func watchFmtHolder(pw map[string]interface{}) string {
+	if pw == nil {
+		return ""
+	}
+	name := asString(pw["name"])
+	if name == "" {
+		name = asString(pw["ref"])
+	}
+	if name == "" {
+		return ""
+	}
+	parts := strings.Split(name, "/")
+	return parts[len(parts)-1]
+}
+
+func watchFmtBinding(mode string) string {
+	labels := map[string]string{
+		"stream":   "stream ← SSE listen()",
+		"poll":     "poll ← periodic pull",
+		"http":     "http ← AXME pushes to callback_url",
+		"inbox":    "inbox ← reply_to mechanism",
+		"internal": "internal ← built-in runtime",
+	}
+	if l, ok := labels[mode]; ok {
+		return l
+	}
+	return mode
 }
 
 // ---------------------------------------------------------------------------
@@ -456,7 +888,6 @@ func newScenariosCreateCmd(rt *runtime) *cobra.Command {
 				if fromTemplate != "" {
 					chosenMacroID = fromTemplate
 				} else {
-					// fetch templates
 					fmt.Println("? Fetching templates from Tool Registry...")
 					ctx := rt.effectiveContext()
 					tStatus, tBody, _, tErr := rt.request(cmd.Context(), ctx, "GET", "/v1/tool-registry/macros", nil, nil, true)
@@ -491,7 +922,6 @@ func newScenariosCreateCmd(rt *runtime) *cobra.Command {
 					fmt.Printf("\n  Template: %s\n", chosenMacroID)
 					fmt.Println("  Parameters:")
 					params := map[string]interface{}{}
-					// fetch macro definition for parameter hints
 					ctx := rt.effectiveContext()
 					mStatus, mBody, _, mErr := rt.request(cmd.Context(), ctx, "GET", "/v1/tool-registry/macros/"+chosenMacroID, nil, nil, true)
 					if mErr == nil && mStatus < 400 {
@@ -507,13 +937,12 @@ func newScenariosCreateCmd(rt *runtime) *cobra.Command {
 							}
 						}
 					} else {
-						// fallback: common approval parameters
 						for _, paramName := range []string{"step_deadline_seconds", "remind_after_seconds", "max_reminders", "escalate_to"} {
 							defaults := map[string]string{
 								"step_deadline_seconds": "300",
 								"remind_after_seconds":  "1800",
-								"max_reminders":        "3",
-								"escalate_to":          "skip",
+								"max_reminders":         "3",
+								"escalate_to":           "skip",
 							}
 							val := wizardPromptIndented(scanner, paramName, defaults[paramName])
 							if val != "" && val != "skip" {
@@ -561,7 +990,6 @@ func newScenariosCreateCmd(rt *runtime) *cobra.Command {
 				}
 			}
 
-			// ── Payload fields ──────────────────────────────────────────────
 			fmt.Println("\n  Payload fields (press Enter to skip):")
 			payload := map[string]interface{}{}
 			for _, fieldName := range []string{"service", "environment", "reason"} {
@@ -571,7 +999,6 @@ func newScenariosCreateCmd(rt *runtime) *cobra.Command {
 				}
 			}
 
-			// ── Summary ─────────────────────────────────────────────────────
 			fmt.Println("\n── Summary ──────────────────────────────────────────────")
 			fmt.Printf("  Scenario:    %s\n", scenarioID)
 			agentNames := make([]string, 0, len(agents))
@@ -593,12 +1020,11 @@ func newScenariosCreateCmd(rt *runtime) *cobra.Command {
 				fmt.Printf("  Deadline:    %s from now\n", deadlineStr)
 			}
 
-			// ── Save ────────────────────────────────────────────────────────
 			if outputFile == "" {
 				outputFile = wizardPrompt(scanner, fmt.Sprintf("Save to file [%s.json]", scenarioID), scenarioID+".json")
 			}
 
-			bundle := scenarioBundle{
+			newBundle := scenarioBundle{
 				ScenarioID:  scenarioID,
 				Description: description,
 				Agents:      agents,
@@ -614,13 +1040,13 @@ func newScenariosCreateCmd(rt *runtime) *cobra.Command {
 				},
 			}
 			if len(humans) > 0 {
-				bundle.Humans = humans
+				newBundle.Humans = humans
 			}
 			if workflow != nil {
-				bundle.Workflow = workflow
+				newBundle.Workflow = workflow
 			}
 
-			data, err := json.MarshalIndent(bundle, "", "  ")
+			data, err := json.MarshalIndent(newBundle, "", "  ")
 			if err != nil {
 				return &cliError{Code: 1, Msg: fmt.Sprintf("failed to marshal bundle: %v", err)}
 			}
@@ -631,8 +1057,10 @@ func newScenariosCreateCmd(rt *runtime) *cobra.Command {
 
 			applyNow := wizardPrompt(scanner, "Apply now? [y/N]", "N")
 			if strings.EqualFold(strings.TrimSpace(applyNow), "y") {
+				watchNow := wizardPrompt(scanner, "Watch intent lifecycle? [y/N]", "N")
+				doWatch := strings.EqualFold(strings.TrimSpace(watchNow), "y")
 				fmt.Printf("→ running axme scenarios apply %s\n", outputFile)
-				return scenariosClientSideApply(rt, cmd, bundle)
+				return scenariosClientSideApply(rt, cmd, newBundle, doWatch)
 			}
 
 			return nil
@@ -679,7 +1107,6 @@ func wizardPromptIndented(scanner *bufio.Scanner, label, defaultVal string) stri
 // parseDurationShorthand parses durations like "4h", "30m", "2d" etc.
 func parseDurationShorthand(s string) (time.Duration, error) {
 	s = strings.TrimSpace(strings.ToLower(s))
-	// Handle days shorthand since Go's time.ParseDuration doesn't
 	if strings.HasSuffix(s, "d") {
 		numStr := strings.TrimSuffix(s, "d")
 		num, err := strconv.ParseFloat(numStr, 64)
