@@ -1956,36 +1956,45 @@ server-side audit trail, in chronological order.`,
 				}
 
 				reason := asString(ev["waiting_reason"])
-
-				// status change
-				if status != "" && status != prevStatus {
-					fmtNew := watchFmtStatus(status, reason)
-					fmtPrev := prevStatus
-					if fmtPrev == "" {
-						fmtPrev = "—"
-					} else {
-						fmtPrev = watchFmtStatus(prevStatus, "")
-					}
-					watchTagAt(at, "status:change", fmt.Sprintf("%s  →  %s", fmtPrev, fmtNew))
-					prevStatus = status
+				newFmt := watchFmtStatus(status, reason)
+				prevFmt := watchFmtStatus(prevStatus, "")
+				if prevStatus == "" {
+					prevFmt = "—"
 				}
 
-				// holder change
-				if holder != "" && holder != prevHolder {
+				if status != "" && newFmt != prevFmt {
+					// Status changed — show step:done + status:change + cur_holder
+					if prevHolder != "" && holder != "" && holder != prevHolder && prevHolder != "agent_core" {
+						watchTagAt(at, "step:done", fmt.Sprintf("%s completed", prevHolder))
+					}
+					watchTagAt(at, "status:change", fmt.Sprintf("%s  →  %s", prevFmt, newFmt))
+					if holder != "" {
+						watchTagAt(at, "cur_holder", holder)
+					}
+					prevStatus = status
+				} else if holder != "" && holder != prevHolder {
+					// Same status, different holder — show step:done + handoff + cur_holder
+					if prevHolder != "" && prevHolder != "agent_core" {
+						watchTagAt(at, "step:done", fmt.Sprintf("%s completed", prevHolder))
+					}
+					watchTagAt(at, "status:change", fmt.Sprintf("%s  →  %s (%s)", prevFmt, newFmt, holder))
 					watchTagAt(at, "cur_holder", holder)
+				}
+				if holder != "" {
 					prevHolder = holder
+				}
+				if status != "" {
+					prevStatus = status
 				}
 
 				// special events
 				switch {
-				case strings.Contains(evType, "human_task"):
-					watchTagAt(at, "human:task", "human task assigned — awaiting approval")
 				case strings.Contains(evType, "reminder"):
-					watchTagAt(at, "reminder", fmt.Sprintf("reminder sent (event: %s)", evType))
+					watchTagAt(at, "reminder", fmt.Sprintf("reminder sent to %s", holder))
 				case strings.Contains(evType, "escalat"):
 					watchTagAt(at, "escalation", fmt.Sprintf("escalated (event: %s)", evType))
 				case strings.Contains(evType, "delivery_failed"):
-					watchTagAt(at, "delivery:failed", fmt.Sprintf("delivery failed (event: %s)", evType))
+					watchTagAt(at, "delivery:failed", "delivery failed")
 				case strings.Contains(evType, "timed_out"):
 					watchTagAt(at, "timeout", "TIMED_OUT — deadline exceeded")
 				}
