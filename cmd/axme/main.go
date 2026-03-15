@@ -1602,23 +1602,7 @@ func newInitCmd(rt *runtime) *cobra.Command {
 	return cmd
 }
 
-func newExamplesCmd(rt *runtime) *cobra.Command {
-	return &cobra.Command{
-		Use:   "examples",
-		Short: "List runnable built-in examples",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			items := []map[string]any{
-				{"name": "approval-resume", "description": "Durable approval flow with waiting and resume-ready payload"},
-				{"name": "tool-waiting", "description": "Intent payload simulating WAITING_FOR_TOOL stage"},
-			}
-			if rt.outputJSON {
-				return rt.printJSON(items)
-			}
-			printTable([]string{"NAME", "DESCRIPTION"}, items, []string{"name", "description"})
-			return nil
-		},
-	}
-}
+// newExamplesCmd is defined in examples.go
 
 func newRunCmd(rt *runtime) *cobra.Command {
 	return &cobra.Command{

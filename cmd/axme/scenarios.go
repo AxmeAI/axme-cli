@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -592,7 +593,9 @@ func watchIntentLive(rt *runtime, cmd *cobra.Command, intentID string, bundle *s
 
 		resp, err := rt.streamClient.Do(req)
 		if err != nil {
-			return fmt.Errorf("watch: connection failed: %w", err)
+			// SSE connection failed — retry after short delay
+			time.Sleep(2 * time.Second)
+			continue
 		}
 
 		done, newSeq, newStatus, newHolder := consumeEventStream(resp.Body, curStatus, lastHolder, nextSeq, terminalStatuses, bundle)
@@ -604,7 +607,14 @@ func watchIntentLive(rt *runtime, cmd *cobra.Command, intentID string, bundle *s
 		if done {
 			break
 		}
-		// stream.timeout — reconnect immediately
+
+		// SSE stream ended (timeout or disconnect) — check intent status
+		// directly to catch completions missed during reconnect gap.
+		if fallbackStatus := rt.checkIntentStatus(cmd.Context(), apiKey, baseURL, intentID); terminalStatuses[fallbackStatus] {
+			curStatus = fallbackStatus
+			break
+		}
+		// Reconnect
 	}
 
 	// Final summary
@@ -616,8 +626,35 @@ func watchIntentLive(rt *runtime, cmd *cobra.Command, intentID string, bundle *s
 	fmt.Println()
 	fmt.Println("  Audit log:")
 	fmt.Printf("    axme intents get %s\n", intentID)
+	fmt.Printf("    axme intents log %s\n", intentID)
 	fmt.Println()
 	return nil
+}
+
+// checkIntentStatus does a direct GET to check if intent reached terminal state.
+// Used as fallback when SSE stream disconnects.
+func (rt *runtime) checkIntentStatus(ctx context.Context, apiKey, baseURL, intentID string) string {
+	url := baseURL + "/v1/intents/" + intentID
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("X-Api-Key", apiKey)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	var body map[string]interface{}
+	if json.NewDecoder(resp.Body).Decode(&body) != nil {
+		return ""
+	}
+	intent, _ := body["intent"].(map[string]interface{})
+	if intent == nil {
+		intent = body
+	}
+	return strings.ToUpper(asString(intent["lifecycle_status"]))
 }
 
 // consumeEventStream reads SSE events and prints them. Returns (terminal, nextSeq, lastStatus, lastHolder).
@@ -734,15 +771,20 @@ func renderWatchEvent(ev map[string]interface{}, curStatus string, prevHolder st
 
 	if newFmt != prevFmt {
 		// Status changed (e.g. DELIVERED → WAITING, WAITING → COMPLETED)
+		if prevHolder != "" && holder != "" && holder != prevHolder && prevHolder != "agent_core" {
+			watchTag("step:done", fmt.Sprintf("%s completed", prevHolder))
+		}
+		watchTag("status:change", fmt.Sprintf("%s  →  %s", prevFmt, newFmt))
 		if holder != "" {
 			watchTag("cur_holder", holder)
 		}
-		watchTag("status:change", fmt.Sprintf("%s  →  %s", prevFmt, newFmt))
 	} else if holder != "" && holder != prevHolder {
-		// Same status but different holder (e.g. WAITING(agent1) → WAITING(agent2),
-		// or WAITING(agent) → WAITING(human)). Show the handoff.
+		// Same status but different holder (e.g. WAITING(agent1) → WAITING(agent2)).
+		if prevHolder != "" && prevHolder != "agent_core" {
+			watchTag("step:done", fmt.Sprintf("%s completed", prevHolder))
+		}
+		watchTag("status:change", fmt.Sprintf("%s  →  %s (%s)", prevFmt, newFmt, holder))
 		watchTag("cur_holder", holder)
-		watchTag("step:handoff", fmt.Sprintf("%s  →  %s", newFmt, holder))
 	}
 
 	if terminalStatuses[evStatus] {

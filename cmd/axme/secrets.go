@@ -186,12 +186,9 @@ func initSecretStore(cfgFile string) (secretStore, error) {
 	case "keyring":
 		return &keyringSecretStore{}, nil
 	case "":
-		// Auto-detect: probe keyring availability, fall back to file silently.
-		probe := &keyringSecretStore{}
-		if _, err := probe.Load("__probe__"); err == nil {
-			return probe, nil
-		}
-		return &fileSecretStore{path: filePath, autoFallback: true}, nil
+		// Default: file-based storage. Reliable across SSH, CI/CD, containers,
+		// headless servers. Keyring is opt-in via AXME_CLI_SECRET_STORAGE=keyring.
+		return &fileSecretStore{path: filePath}, nil
 	default:
 		return nil, fmt.Errorf(
 			"unsupported secret storage mode %q in %s (supported: keyring, file)",
