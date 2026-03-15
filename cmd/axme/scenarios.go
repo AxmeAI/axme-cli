@@ -575,6 +575,7 @@ func watchIntentLive(rt *runtime, cmd *cobra.Command, intentID string, bundle *s
 	fmt.Println()
 
 	curStatus := "SUBMITTED"
+	lastHolder := ""
 	nextSeq := 0
 	terminalStatuses := map[string]bool{
 		"COMPLETED": true, "FAILED": true, "CANCELED": true, "TIMED_OUT": true,
@@ -594,9 +595,10 @@ func watchIntentLive(rt *runtime, cmd *cobra.Command, intentID string, bundle *s
 			return fmt.Errorf("watch: connection failed: %w", err)
 		}
 
-		done, newSeq, newStatus := consumeEventStream(resp.Body, curStatus, nextSeq, terminalStatuses, bundle)
+		done, newSeq, newStatus, newHolder := consumeEventStream(resp.Body, curStatus, lastHolder, nextSeq, terminalStatuses, bundle)
 		_ = resp.Body.Close()
 		curStatus = newStatus
+		lastHolder = newHolder
 		nextSeq = newSeq
 
 		if done {
@@ -618,11 +620,12 @@ func watchIntentLive(rt *runtime, cmd *cobra.Command, intentID string, bundle *s
 	return nil
 }
 
-// consumeEventStream reads SSE events and prints them. Returns (terminal, nextSeq, lastStatus).
-func consumeEventStream(body io.Reader, curStatus string, startSeq int, terminalStatuses map[string]bool, bundle *scenarioBundle) (bool, int, string) {
+// consumeEventStream reads SSE events and prints them. Returns (terminal, nextSeq, lastStatus, lastHolder).
+func consumeEventStream(body io.Reader, curStatus string, curHolder string, startSeq int, terminalStatuses map[string]bool, bundle *scenarioBundle) (bool, int, string, string) {
 	scanner := bufio.NewScanner(body)
 	nextSeq := startSeq
 	lastStatus := curStatus
+	lastHolder := curHolder
 
 	var eventType, eventData string
 
@@ -633,14 +636,17 @@ func consumeEventStream(body io.Reader, curStatus string, startSeq int, terminal
 			// dispatch accumulated event
 			if eventType != "" && eventData != "" {
 				if eventType == "stream.timeout" {
-					return false, nextSeq, lastStatus
+					return false, nextSeq, lastStatus, lastHolder
 				}
 				var ev map[string]interface{}
 				if err := json.Unmarshal([]byte(eventData), &ev); err == nil {
-					terminal, newStatus := renderWatchEvent(ev, lastStatus, bundle)
+					terminal, newStatus, newHolder := renderWatchEvent(ev, lastStatus, lastHolder, bundle)
 					lastStatus = newStatus
+					if newHolder != "" {
+						lastHolder = newHolder
+					}
 					if terminal {
-						return true, nextSeq, lastStatus
+						return true, nextSeq, lastStatus, lastHolder
 					}
 					if seq, ok := ev["seq"].(float64); ok {
 						nextSeq = int(seq) + 1
@@ -662,15 +668,18 @@ func consumeEventStream(body io.Reader, curStatus string, startSeq int, terminal
 			}
 		}
 	}
-	return false, nextSeq, lastStatus
+	return false, nextSeq, lastStatus, lastHolder
 }
 
 // renderWatchEvent processes a single SSE event and prints it.
-// Returns (isTerminal, newStatus).
-func renderWatchEvent(ev map[string]interface{}, curStatus string, bundle *scenarioBundle) (bool, string) {
+// Returns (isTerminal, newStatus, currentHolder).
+func renderWatchEvent(ev map[string]interface{}, curStatus string, prevHolder string, bundle *scenarioBundle) (bool, string, string) {
 	evType := asString(ev["event_type"])
 	evStatus := asString(ev["status"])
-	evReason := asString(ev["lifecycle_waiting_reason"])
+	evReason := asString(ev["waiting_reason"])
+	if evReason == "" {
+		evReason = asString(ev["lifecycle_waiting_reason"])
+	}
 	if evReason == "" {
 		evReason = asString(ev["reason"])
 	}
@@ -688,50 +697,58 @@ func renderWatchEvent(ev map[string]interface{}, curStatus string, bundle *scena
 		}
 		watchTag("system", fmt.Sprintf("human task: %s", title))
 		watchTag("status:change", fmt.Sprintf("%s  →  WAITING (for human)", watchFmtStatus(curStatus, "")))
-		return false, "WAITING"
+		return false, "WAITING", prevHolder
 
 	case "intent.reminder":
 		pw := asMap(ev["pending_with"])
 		holder := watchFmtHolder(pw)
 		watchTag("reminder", fmt.Sprintf("REMINDER sent to %s", holder))
-		return false, curStatus
+		return false, curStatus, prevHolder
 
 	case "intent.escalated":
 		details := asMap(ev["details"])
 		escalatedTo := asString(details["escalated_to"])
 		watchTag("escalation", fmt.Sprintf("escalated to %s", escalatedTo))
-		return false, curStatus
+		return false, curStatus, prevHolder
 
 	case "intent.timed_out":
 		watchTag("timeout", "TIMED_OUT — deadline exceeded")
-		return true, "TIMED_OUT"
+		return true, "TIMED_OUT", prevHolder
 
 	case "intent.delivery_failed":
 		details := asMap(ev["details"])
 		attempt := asString(details["delivery_attempt"])
 		watchTag("delivery:failed", fmt.Sprintf("max delivery attempts reached  (attempt=%s)", attempt))
-		return false, "FAILED"
+		return false, "FAILED", prevHolder
 	}
 
 	// Status change event
 	if evStatus == "" {
-		return false, curStatus
+		return false, curStatus, prevHolder
 	}
 
+	pw := asMap(ev["pending_with"])
+	holder := watchFmtHolder(pw)
 	newFmt := watchFmtStatus(evStatus, evReason)
-	if newFmt != watchFmtStatus(curStatus, "") {
-		pw := asMap(ev["pending_with"])
-		holder := watchFmtHolder(pw)
+	prevFmt := watchFmtStatus(curStatus, "")
+
+	if newFmt != prevFmt {
+		// Status changed (e.g. DELIVERED → WAITING, WAITING → COMPLETED)
 		if holder != "" {
 			watchTag("cur_holder", holder)
 		}
-		watchTag("status:change", fmt.Sprintf("%s  →  %s", watchFmtStatus(curStatus, ""), newFmt))
+		watchTag("status:change", fmt.Sprintf("%s  →  %s", prevFmt, newFmt))
+	} else if holder != "" && holder != prevHolder {
+		// Same status but different holder (e.g. WAITING(agent1) → WAITING(agent2),
+		// or WAITING(agent) → WAITING(human)). Show the handoff.
+		watchTag("cur_holder", holder)
+		watchTag("step:handoff", fmt.Sprintf("%s  →  %s", newFmt, holder))
 	}
 
 	if terminalStatuses[evStatus] {
-		return true, evStatus
+		return true, evStatus, holder
 	}
-	return false, evStatus
+	return false, evStatus, holder
 }
 
 // ---------------------------------------------------------------------------
