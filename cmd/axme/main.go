@@ -193,7 +193,7 @@ func buildRoot(rt *runtime) *cobra.Command {
 		newDoctorCmd(rt),
 		newVersionCmd(rt),
 		newUpdateCmd(rt),
-		newRawCmd(rt),
+		// newRawCmd removed — debug tool, not for public CLI
 		newQuotaCmd(rt),
 	)
 	return cmd
