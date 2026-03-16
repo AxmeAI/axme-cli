@@ -68,17 +68,17 @@ func TestSubmitTaskResult_RejectedWithComment(t *testing.T) {
 }
 
 func TestSubmitTaskResult_WithExtraData(t *testing.T) {
+	// --data fields are placed at task_result top level (not nested in "data")
+	// so gateway form_schema validation finds them as required fields.
 	extraData := map[string]string{
-		"ticket":    "INFRA-123",
+		"ticket":     "INFRA-123",
 		"risk_level": "low",
-	}
-	data := map[string]interface{}{}
-	for k, v := range extraData {
-		data[k] = v
 	}
 	taskResult := map[string]interface{}{
 		"outcome": "approved",
-		"data":    data,
+	}
+	for k, v := range extraData {
+		taskResult[k] = v
 	}
 	payload := map[string]interface{}{
 		"task_result": taskResult,
@@ -94,9 +94,14 @@ func TestSubmitTaskResult_WithExtraData(t *testing.T) {
 	}
 
 	tr := decoded["task_result"].(map[string]interface{})
-	d := tr["data"].(map[string]interface{})
-	if d["ticket"] != "INFRA-123" {
-		t.Errorf("data.ticket mismatch: got %v", d["ticket"])
+	if tr["ticket"] != "INFRA-123" {
+		t.Errorf("ticket mismatch: got %v", tr["ticket"])
+	}
+	if tr["risk_level"] != "low" {
+		t.Errorf("risk_level mismatch: got %v", tr["risk_level"])
+	}
+	if _, ok := tr["data"]; ok {
+		t.Error("data key should not be present — fields go at top level")
 	}
 }
 
@@ -213,14 +218,13 @@ func TestTasksSubmit_ArbitraryOutcome(t *testing.T) {
 }
 
 func TestTasksSubmit_WithCommentAndData(t *testing.T) {
+	// --data fields go at task_result top level alongside outcome/comment
 	comment := "Routing to ops-lead"
 	taskResult := map[string]interface{}{
 		"outcome": "escalated",
 		"comment": comment,
-		"data": map[string]interface{}{
-			"reason": "sla_breach",
-			"ticket": "OPS-999",
-		},
+		"reason":  "sla_breach",
+		"ticket":  "OPS-999",
 	}
 	payload := map[string]interface{}{
 		"task_result": taskResult,
@@ -240,9 +244,11 @@ func TestTasksSubmit_WithCommentAndData(t *testing.T) {
 	if tr["comment"] != comment {
 		t.Errorf("comment mismatch: got %v", tr["comment"])
 	}
-	d := tr["data"].(map[string]interface{})
-	if d["ticket"] != "OPS-999" {
-		t.Errorf("data.ticket mismatch: got %v", d["ticket"])
+	if tr["ticket"] != "OPS-999" {
+		t.Errorf("ticket mismatch: got %v", tr["ticket"])
+	}
+	if tr["reason"] != "sla_breach" {
+		t.Errorf("reason mismatch: got %v", tr["reason"])
 	}
 }
 

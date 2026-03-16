@@ -110,7 +110,7 @@ func run() int {
 		cfgFile: cfgFile,
 		cfg:     cfg,
 		httpClient: &http.Client{
-			Timeout: 25 * time.Second,
+			Timeout: 60 * time.Second,
 		},
 		// streamClient has no Timeout so SSE long-polls are not cut off by the
 		// client after 25 s. Individual stream calls pass a context with cancel
