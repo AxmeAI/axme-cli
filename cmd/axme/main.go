@@ -3039,13 +3039,16 @@ func newRawCmd(rt *runtime) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			method := strings.ToUpper(args[0])
 			path := args[1]
-			q := map[string]string{}
-			for _, item := range query {
-				parts := strings.SplitN(item, "=", 2)
-				if len(parts) != 2 {
-					return &cliError{Code: 2, Msg: "query must be key=value"}
+			var q map[string]string
+			if len(query) > 0 {
+				q = map[string]string{}
+				for _, item := range query {
+					parts := strings.SplitN(item, "=", 2)
+					if len(parts) != 2 {
+						return &cliError{Code: 2, Msg: "query must be key=value"}
+					}
+					q[parts[0]] = parts[1]
 				}
-				q[parts[0]] = parts[1]
 			}
 			var payload map[string]any
 			if dataJSON != "" {
@@ -3053,7 +3056,52 @@ func newRawCmd(rt *runtime) *cobra.Command {
 					return &cliError{Code: 2, Msg: "--data-json must be JSON object"}
 				}
 			}
-			status, body, _, err := rt.request(cmd.Context(), rt.effectiveContext(), method, path, q, payload, true)
+			// Build request directly — raw is a debug/diagnostic tool that
+			// should bypass proactive refresh and middleware to show exact
+			// server responses.
+			c := rt.effectiveContext()
+			base := strings.TrimRight(c.BaseURL, "/")
+			if !strings.HasPrefix(path, "/") {
+				path = "/" + path
+			}
+			fullURL := base + path
+			if len(q) > 0 {
+				vals := url.Values{}
+				for k, v := range q {
+					vals.Set(k, v)
+				}
+				fullURL += "?" + vals.Encode()
+			}
+			var reqBody io.Reader
+			if payload != nil {
+				raw, _ := json.Marshal(payload)
+				reqBody = bytes.NewReader(raw)
+			}
+			httpReq, _ := http.NewRequestWithContext(cmd.Context(), method, fullURL, reqBody)
+			httpReq.Header.Set("accept", "application/json")
+			if payload != nil {
+				httpReq.Header.Set("content-type", "application/json")
+			}
+			if c.APIKey != "" {
+				httpReq.Header.Set("x-api-key", c.APIKey)
+			}
+			if at := c.resolvedActorToken(); at != "" {
+				httpReq.Header.Set("authorization", "Bearer "+at)
+			}
+			if c.OwnerAgent != "" {
+				httpReq.Header.Set("x-owner-agent", c.OwnerAgent)
+			}
+			directClient := &http.Client{Timeout: 60 * time.Second}
+			httpResp, httpErr := directClient.Do(httpReq)
+			if httpErr != nil {
+				return httpErr
+			}
+			defer httpResp.Body.Close()
+			rawBytes, _ := io.ReadAll(httpResp.Body)
+			body := map[string]any{}
+			_ = json.Unmarshal(rawBytes, &body)
+			status := httpResp.StatusCode
+			var err error
 			if err != nil {
 				return err
 			}
