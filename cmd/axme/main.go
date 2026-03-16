@@ -3245,7 +3245,10 @@ func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path st
 		// proactive path having a chance to save the rotated token first.
 		actorToken := c.resolvedActorToken()
 		secs := jwtSecondsUntilExpiry(actorToken)
-		if actorToken == "" || secs < 300 {
+		// Refresh only when token is expired or expires within 60s.
+		// Previously 300s window caused excessive refresh token rotation
+		// (one-time-use tokens consumed too eagerly → next CLI call fails).
+		if actorToken == "" || secs < 60 {
 			_, _ = rt.tryRefreshActorToken(ctx, c)
 			proactiveRefreshed = true
 		}
