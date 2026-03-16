@@ -269,12 +269,12 @@ func submitTaskResult(rt *runtime, cmd *cobra.Command, intentID, outcome, commen
 	if comment != "" {
 		taskResult["comment"] = comment
 	}
+	// Place --data fields at task_result top level (not nested in "data")
+	// so gateway form_schema validation finds them as required fields.
 	if len(extraData) > 0 {
-		data := map[string]interface{}{}
 		for k, v := range extraData {
-			data[k] = v
+			taskResult[k] = v
 		}
-		taskResult["data"] = data
 	}
 
 	payload := map[string]interface{}{

@@ -640,7 +640,7 @@ func (rt *runtime) checkIntentStatus(ctx context.Context, apiKey, baseURL, inten
 		return ""
 	}
 	req.Header.Set("X-Api-Key", apiKey)
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return ""

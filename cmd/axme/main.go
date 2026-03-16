@@ -110,7 +110,7 @@ func run() int {
 		cfgFile: cfgFile,
 		cfg:     cfg,
 		httpClient: &http.Client{
-			Timeout: 25 * time.Second,
+			Timeout: 60 * time.Second,
 		},
 		// streamClient has no Timeout so SSE long-polls are not cut off by the
 		// client after 25 s. Individual stream calls pass a context with cancel
@@ -193,7 +193,7 @@ func buildRoot(rt *runtime) *cobra.Command {
 		newDoctorCmd(rt),
 		newVersionCmd(rt),
 		newUpdateCmd(rt),
-		newRawCmd(rt),
+		// newRawCmd removed — debug tool, not for public CLI
 		newQuotaCmd(rt),
 	)
 	return cmd
@@ -1637,7 +1637,7 @@ func newRunCmd(rt *runtime) *cobra.Command {
 
 func newIntentsCmd(rt *runtime) *cobra.Command {
 	cmd := &cobra.Command{Use: "intents", Aliases: []string{"intent"}, Short: "Durable execution intents"}
-	cmd.AddCommand(newIntentsListCmd(rt), newIntentsGetCmd(rt), newIntentsWatchCmd(rt), newIntentsCancelCmd(rt), newIntentsRetryCmd(rt), newIntentsResumeCmd(rt), newIntentsSendCmd(rt), newIntentsLogCmd(rt))
+	cmd.AddCommand(newIntentsListCmd(rt), newIntentsGetCmd(rt), newIntentsWatchCmd(rt), newIntentsCancelCmd(rt), newIntentsRetryCmd(rt), newIntentsResumeCmd(rt), newIntentsSendCmd(rt), newIntentsLogCmd(rt), newIntentsCleanupCmd(rt))
 	return cmd
 }
 
@@ -1807,6 +1807,71 @@ func newIntentsCancelCmd(rt *runtime) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&reason, "reason", "canceled via axme cli", "cancel reason")
 	cmd.Flags().StringVar(&actor, "actor", "", "actor id")
+	return cmd
+}
+
+func newIntentsCleanupCmd(rt *runtime) *cobra.Command {
+	var olderThan float64
+	var dryRun bool
+	var reason string
+	var limitN int
+	cmd := &cobra.Command{
+		Use:   "cleanup",
+		Short: "Cancel stuck/zombie intents that have been inactive for too long",
+		Long: `Bulk-cancel intents stuck in non-terminal status (DELIVERED, WAITING, etc.)
+for longer than the specified duration.
+
+Use --dry-run (default) to preview what would be canceled.
+
+Examples:
+  axme intents cleanup --older-than 24 --dry-run
+  axme intents cleanup --older-than 12 --dry-run=false
+  axme intents cleanup --older-than 1 --dry-run=false --reason "test cleanup"`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := rt.effectiveContext()
+			payload := map[string]any{
+				"older_than_hours": olderThan,
+				"dry_run":         dryRun,
+				"reason":          reason,
+				"limit":           limitN,
+			}
+			status, body, _, err := rt.request(cmd.Context(), ctx, "POST", "/v1/intents/bulk-cancel", nil, payload, true)
+			if err != nil {
+				return err
+			}
+			if status >= 400 {
+				detail := asString(body["detail"])
+				if detail == "" {
+					detail = fmt.Sprintf("HTTP %d", status)
+				}
+				return &cliError{Code: 1, Msg: fmt.Sprintf("cleanup failed: %s", detail)}
+			}
+
+			if rt.outputJSON {
+				return rt.printJSON(body)
+			}
+
+			if dryRun {
+				count := int(asFloat(body["would_cancel"]))
+				fmt.Printf("Dry run: %d intents would be canceled\n", count)
+				ids := asSlice(body["intent_ids"])
+				for _, id := range ids {
+					fmt.Printf("  %s\n", asString(id))
+				}
+				if count > 0 {
+					fmt.Printf("\nRun with --dry-run=false to execute.\n")
+				}
+			} else {
+				count := int(asFloat(body["canceled"]))
+				fmt.Printf("✓ Canceled %d zombie intents (reason: %s)\n", count, reason)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().Float64Var(&olderThan, "older-than", 24, "Cancel intents inactive for more than this many hours")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", true, "Preview only — do not actually cancel")
+	cmd.Flags().StringVar(&reason, "reason", "zombie cleanup via CLI", "Cancellation reason")
+	cmd.Flags().IntVar(&limitN, "limit", 500, "Maximum number of intents to cancel")
 	return cmd
 }
 
@@ -2974,13 +3039,16 @@ func newRawCmd(rt *runtime) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			method := strings.ToUpper(args[0])
 			path := args[1]
-			q := map[string]string{}
-			for _, item := range query {
-				parts := strings.SplitN(item, "=", 2)
-				if len(parts) != 2 {
-					return &cliError{Code: 2, Msg: "query must be key=value"}
+			var q map[string]string
+			if len(query) > 0 {
+				q = map[string]string{}
+				for _, item := range query {
+					parts := strings.SplitN(item, "=", 2)
+					if len(parts) != 2 {
+						return &cliError{Code: 2, Msg: "query must be key=value"}
+					}
+					q[parts[0]] = parts[1]
 				}
-				q[parts[0]] = parts[1]
 			}
 			var payload map[string]any
 			if dataJSON != "" {
@@ -2988,7 +3056,52 @@ func newRawCmd(rt *runtime) *cobra.Command {
 					return &cliError{Code: 2, Msg: "--data-json must be JSON object"}
 				}
 			}
-			status, body, _, err := rt.request(cmd.Context(), rt.effectiveContext(), method, path, q, payload, true)
+			// Build request directly — raw is a debug/diagnostic tool that
+			// should bypass proactive refresh and middleware to show exact
+			// server responses.
+			c := rt.effectiveContext()
+			base := strings.TrimRight(c.BaseURL, "/")
+			if !strings.HasPrefix(path, "/") {
+				path = "/" + path
+			}
+			fullURL := base + path
+			if len(q) > 0 {
+				vals := url.Values{}
+				for k, v := range q {
+					vals.Set(k, v)
+				}
+				fullURL += "?" + vals.Encode()
+			}
+			var reqBody io.Reader
+			if payload != nil {
+				raw, _ := json.Marshal(payload)
+				reqBody = bytes.NewReader(raw)
+			}
+			httpReq, _ := http.NewRequestWithContext(cmd.Context(), method, fullURL, reqBody)
+			httpReq.Header.Set("accept", "application/json")
+			if payload != nil {
+				httpReq.Header.Set("content-type", "application/json")
+			}
+			if c.APIKey != "" {
+				httpReq.Header.Set("x-api-key", c.APIKey)
+			}
+			if at := c.resolvedActorToken(); at != "" {
+				httpReq.Header.Set("authorization", "Bearer "+at)
+			}
+			if c.OwnerAgent != "" {
+				httpReq.Header.Set("x-owner-agent", c.OwnerAgent)
+			}
+			directClient := &http.Client{Timeout: 60 * time.Second}
+			httpResp, httpErr := directClient.Do(httpReq)
+			if httpErr != nil {
+				return httpErr
+			}
+			defer httpResp.Body.Close()
+			rawBytes, _ := io.ReadAll(httpResp.Body)
+			body := map[string]any{}
+			_ = json.Unmarshal(rawBytes, &body)
+			status := httpResp.StatusCode
+			var err error
 			if err != nil {
 				return err
 			}
@@ -3132,7 +3245,10 @@ func (rt *runtime) request(ctx context.Context, c *clientConfig, method, path st
 		// proactive path having a chance to save the rotated token first.
 		actorToken := c.resolvedActorToken()
 		secs := jwtSecondsUntilExpiry(actorToken)
-		if actorToken == "" || secs < 300 {
+		// Refresh only when token is expired or expires within 60s.
+		// Previously 300s window caused excessive refresh token rotation
+		// (one-time-use tokens consumed too eagerly → next CLI call fails).
+		if actorToken == "" || secs < 60 {
 			_, _ = rt.tryRefreshActorToken(ctx, c)
 			proactiveRefreshed = true
 		}
