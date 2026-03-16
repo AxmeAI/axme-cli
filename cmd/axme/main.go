@@ -1637,7 +1637,7 @@ func newRunCmd(rt *runtime) *cobra.Command {
 
 func newIntentsCmd(rt *runtime) *cobra.Command {
 	cmd := &cobra.Command{Use: "intents", Aliases: []string{"intent"}, Short: "Durable execution intents"}
-	cmd.AddCommand(newIntentsListCmd(rt), newIntentsGetCmd(rt), newIntentsWatchCmd(rt), newIntentsCancelCmd(rt), newIntentsRetryCmd(rt), newIntentsResumeCmd(rt), newIntentsSendCmd(rt), newIntentsLogCmd(rt))
+	cmd.AddCommand(newIntentsListCmd(rt), newIntentsGetCmd(rt), newIntentsWatchCmd(rt), newIntentsCancelCmd(rt), newIntentsRetryCmd(rt), newIntentsResumeCmd(rt), newIntentsSendCmd(rt), newIntentsLogCmd(rt), newIntentsCleanupCmd(rt))
 	return cmd
 }
 
@@ -1807,6 +1807,71 @@ func newIntentsCancelCmd(rt *runtime) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&reason, "reason", "canceled via axme cli", "cancel reason")
 	cmd.Flags().StringVar(&actor, "actor", "", "actor id")
+	return cmd
+}
+
+func newIntentsCleanupCmd(rt *runtime) *cobra.Command {
+	var olderThan float64
+	var dryRun bool
+	var reason string
+	var limitN int
+	cmd := &cobra.Command{
+		Use:   "cleanup",
+		Short: "Cancel stuck/zombie intents that have been inactive for too long",
+		Long: `Bulk-cancel intents stuck in non-terminal status (DELIVERED, WAITING, etc.)
+for longer than the specified duration.
+
+Use --dry-run (default) to preview what would be canceled.
+
+Examples:
+  axme intents cleanup --older-than 24 --dry-run
+  axme intents cleanup --older-than 12 --dry-run=false
+  axme intents cleanup --older-than 1 --dry-run=false --reason "test cleanup"`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := rt.effectiveContext()
+			payload := map[string]any{
+				"older_than_hours": olderThan,
+				"dry_run":         dryRun,
+				"reason":          reason,
+				"limit":           limitN,
+			}
+			status, body, _, err := rt.request(cmd.Context(), ctx, "POST", "/v1/intents/bulk-cancel", nil, payload, true)
+			if err != nil {
+				return err
+			}
+			if status >= 400 {
+				detail := asString(body["detail"])
+				if detail == "" {
+					detail = fmt.Sprintf("HTTP %d", status)
+				}
+				return &cliError{Code: 1, Msg: fmt.Sprintf("cleanup failed: %s", detail)}
+			}
+
+			if rt.outputJSON {
+				return rt.printJSON(body)
+			}
+
+			if dryRun {
+				count := int(asFloat(body["would_cancel"]))
+				fmt.Printf("Dry run: %d intents would be canceled\n", count)
+				ids := asSlice(body["intent_ids"])
+				for _, id := range ids {
+					fmt.Printf("  %s\n", asString(id))
+				}
+				if count > 0 {
+					fmt.Printf("\nRun with --dry-run=false to execute.\n")
+				}
+			} else {
+				count := int(asFloat(body["canceled"]))
+				fmt.Printf("✓ Canceled %d zombie intents (reason: %s)\n", count, reason)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().Float64Var(&olderThan, "older-than", 24, "Cancel intents inactive for more than this many hours")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", true, "Preview only — do not actually cancel")
+	cmd.Flags().StringVar(&reason, "reason", "zombie cleanup via CLI", "Cancellation reason")
+	cmd.Flags().IntVar(&limitN, "limit", 500, "Maximum number of intents to cancel")
 	return cmd
 }
 
