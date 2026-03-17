@@ -84,29 +84,28 @@ func newQuotaShowCmd(rt *runtime) *cobra.Command {
 				return nil
 			}
 
+			// Ordered dimension display with human-readable labels
+			dimOrder := []struct{ key, label string }{
+				{"intents_per_day", "Intents / day"},
+				{"rate_limit_per_minute", "Rate limit / min"},
+				{"payload_max_bytes", "Max payload size"},
+				{"storage_bytes", "Storage used"},
+				{"actors_total", "Team members"},
+				{"service_accounts_per_workspace", "Service accounts"},
+				{"sse_streams_max", "SSE streams"},
+			}
+
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "DIMENSION\tUSED\tLIMIT\tUSAGE%")
-			for key, limitVal := range dims {
-				limit := int64(0)
-				switch v := limitVal.(type) {
-				case float64:
-					limit = int64(v)
-				case int64:
-					limit = v
-				case int:
-					limit = int64(v)
+			for _, dim := range dimOrder {
+				limitVal, exists := dims[dim.key]
+				if !exists {
+					continue
 				}
-
+				limit := toInt64(limitVal)
 				used := int64(0)
-				if ud := asMap(usageDims[key]); ud != nil {
-					switch v := ud["used"].(type) {
-					case float64:
-						used = int64(v)
-					case int64:
-						used = v
-					case int:
-						used = int64(v)
-					}
+				if ud := asMap(usageDims[dim.key]); ud != nil {
+					used = toInt64(ud["used"])
 				}
 
 				pctStr := "-"
@@ -120,8 +119,30 @@ func newQuotaShowCmd(rt *runtime) *cobra.Command {
 					}
 					pctStr = fmt.Sprintf("%d%%%s", pct, bar)
 				}
-				dimLabel := strings.ReplaceAll(key, "_", " ")
-				fmt.Fprintf(w, "%s\t%d\t%d\t%s\n", dimLabel, used, limit, pctStr)
+
+				// Format bytes dimensions as human-readable
+				usedStr := fmt.Sprintf("%d", used)
+				limitStr := fmt.Sprintf("%d", limit)
+				if dim.key == "payload_max_bytes" || dim.key == "storage_bytes" {
+					usedStr = formatBytes(used)
+					limitStr = formatBytes(limit)
+				}
+
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", dim.label, usedStr, limitStr, pctStr)
+			}
+			// Show any extra dimensions not in our ordered list
+			for key, limitVal := range dims {
+				found := false
+				for _, dim := range dimOrder {
+					if dim.key == key {
+						found = true
+						break
+					}
+				}
+				if !found {
+					dimLabel := strings.ReplaceAll(key, "_", " ")
+					fmt.Fprintf(w, "%s\t%d\t%d\t-\n", dimLabel, int64(0), toInt64(limitVal))
+				}
 			}
 			if err := w.Flush(); err != nil {
 				return err
@@ -132,11 +153,36 @@ func newQuotaShowCmd(rt *runtime) *cobra.Command {
 			hard := quotaPolicy["hard_enforcement"]
 			fmt.Printf("overage_mode=%s  hard_enforcement=%v\n", overage, hard)
 			fmt.Println()
-			fmt.Println("To request higher limits, email hello@axme.ai with your org email and a description of your use case.")
+			fmt.Println("To request higher limits: axme quota upgrade-request --company <name> --justification <reason>")
 			return nil
 		},
 	}
 	return cmd
+}
+
+func toInt64(v interface{}) int64 {
+	switch val := v.(type) {
+	case float64:
+		return int64(val)
+	case int64:
+		return val
+	case int:
+		return int64(val)
+	}
+	return 0
+}
+
+func formatBytes(b int64) string {
+	switch {
+	case b >= 1073741824:
+		return fmt.Sprintf("%.1f GB", float64(b)/1073741824)
+	case b >= 1048576:
+		return fmt.Sprintf("%.1f MB", float64(b)/1048576)
+	case b >= 1024:
+		return fmt.Sprintf("%.1f KB", float64(b)/1024)
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }
 
 // quota set removed — users must not set their own quotas.
