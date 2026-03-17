@@ -19,13 +19,14 @@ func newQuotaCmd(rt *runtime) *cobra.Command {
 		Short: "View your workspace limits and request a tier upgrade",
 		Long: `View your current quota limits and usage, or request a higher-tier upgrade.
 
-Alpha tiers:
-  unverified      50 intents/day  ·  5 actors   ·  2 service accounts
-  email_verified  500 intents/day ·  20 actors  ·  10 service accounts
-  corporate       5000 intents/day · 200 actors ·  50 service accounts
+Tiers:
+  email_verified (default — applied on first login):
+    500 intents/day · 120 req/min · 128 KB payload · 1 GB storage
+    20 agents · 20 SSE streams
 
-Verify your email to move from unverified → email_verified automatically.
-To request corporate limits, run: axme quota upgrade-request`,
+  corporate (request via: axme quota upgrade-request):
+    5000 intents/day · 600 req/min · 512 KB payload · 10 GB storage
+    50 agents · 100 SSE streams`,
 	}
 	cmd.AddCommand(
 		newQuotaShowCmd(rt),
@@ -88,10 +89,10 @@ func newQuotaShowCmd(rt *runtime) *cobra.Command {
 			dimOrder := []struct{ key, label string }{
 				{"intents_per_day", "Intents / day"},
 				{"rate_limit_per_minute", "Rate limit / min"},
-				{"payload_max_bytes", "Max payload size"},
-				{"storage_bytes", "Storage used"},
+				{"payload_max_bytes", "Max payload"},
+				{"storage_bytes", "Storage"},
 				{"actors_total", "Team members"},
-				{"service_accounts_per_workspace", "Service accounts"},
+				{"service_accounts_per_workspace", "Agents"},
 				{"sse_streams_max", "SSE streams"},
 			}
 
@@ -180,6 +181,8 @@ func formatBytes(b int64) string {
 		return fmt.Sprintf("%.1f MB", float64(b)/1048576)
 	case b >= 1024:
 		return fmt.Sprintf("%.1f KB", float64(b)/1024)
+	case b == 0:
+		return "0"
 	default:
 		return fmt.Sprintf("%d B", b)
 	}
@@ -206,7 +209,7 @@ The request will be reviewed within 1 business day.
 On approval, your workspace quota is automatically upgraded — no further action needed.
 
 Valid upgrade tiers:
-  corporate  — 5 000 intents/day, 200 actors, 50 service accounts (default)`,
+  corporate  — 5000 intents/day · 600 req/min · 512 KB payload · 10 GB storage · 50 agents · 100 SSE streams`,
 		Example: `  axme quota upgrade-request \
     --company "Acme Corp" \
     --justification "Running a production pilot with ~50 AI agents"`,
