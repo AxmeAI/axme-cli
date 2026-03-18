@@ -235,7 +235,6 @@ axme workspace members exclude <member_id>           # revoke workspace access (
 ```bash
 axme logs <intent_id>              # fetch audit log for an intent
 axme trace <intent_id>             # distributed trace view
-axme raw <method> <path> [body]    # raw API call (for debugging)
 axme status                        # gateway and service health
 axme doctor                        # config, connectivity, and auth check
 axme version                       # CLI version and build info
@@ -290,7 +289,7 @@ For teams doing performance analysis or capacity planning:
 
 ![Capacity and Latency Budget](https://raw.githubusercontent.com/AxmeAI/axme-docs/main/docs/diagrams/operations/04-capacity-latency-budget.svg)
 
-*The CLI adds negligible latency overhead. Gateway p99 is the dominant term. Use `axme raw` to send a custom request and inspect the raw response for debugging.*
+*The CLI adds negligible latency overhead. Gateway p99 is the dominant term.*
 
 ---
 
