@@ -23,6 +23,7 @@ type scenarioAgentCreds struct {
 	KeyID            string `json:"key_id"`
 	APIKey           string `json:"api_key"`
 	CreatedAt        string `json:"created_at"`
+	BaseURL          string `json:"base_url,omitempty"`
 }
 
 // scenarioAgentsStore is the on-disk format of ~/.config/axme/scenario-agents.json.
@@ -62,7 +63,7 @@ func saveScenarioAgentsStore(store scenarioAgentsStore) error {
 
 func upsertScenarioAgent(store *scenarioAgentsStore, creds scenarioAgentCreds) {
 	for i, a := range store.Agents {
-		if a.Address == creds.Address {
+		if a.Address == creds.Address && a.BaseURL == creds.BaseURL {
 			store.Agents[i] = creds
 			return
 		}
@@ -389,10 +390,10 @@ func scenariosClientSideApply(rt *runtime, cmd *cobra.Command, bundle scenarioBu
 		}
 
 		if existingSAID != "" {
-			// Ensure we have a key stored locally
+			// Ensure we have a key stored locally for THIS environment
 			hasLocalKey := false
 			for _, a := range agentsStore.Agents {
-				if a.Address == agent.Address && a.APIKey != "" {
+				if a.Address == agent.Address && a.APIKey != "" && a.BaseURL == ctx.BaseURL {
 					hasLocalKey = true
 					break
 				}
@@ -417,6 +418,7 @@ func scenariosClientSideApply(rt *runtime, cmd *cobra.Command, bundle scenarioBu
 					KeyID:            asString(keyObj["key_id"]),
 					APIKey:           asString(keyObj["token"]),
 					CreatedAt:        asString(keyObj["created_at"]),
+					BaseURL:          ctx.BaseURL,
 				}
 				if existingAddress != "" {
 					creds.Address = existingAddress
@@ -472,6 +474,7 @@ func scenariosClientSideApply(rt *runtime, cmd *cobra.Command, bundle scenarioBu
 				KeyID:            asString(keyObj["key_id"]),
 				APIKey:           asString(keyObj["token"]),
 				CreatedAt:        asString(keyObj["created_at"]),
+				BaseURL:          ctx.BaseURL,
 			}
 			upsertScenarioAgent(&agentsStore, creds)
 			storeChanged = true
