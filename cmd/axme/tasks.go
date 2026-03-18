@@ -28,6 +28,9 @@ Authenticate with 'axme login' first; the actor bearer token is sent automatical
 		newTasksGetCmd(rt),
 		newTasksApproveCmd(rt),
 		newTasksRejectCmd(rt),
+		newTasksConfirmCmd(rt),
+		newTasksCompleteCmd(rt),
+		newTasksAssignCmd(rt),
 		newTasksSubmitCmd(rt),
 	)
 	return cmd
@@ -149,8 +152,33 @@ func newTasksGetCmd(rt *runtime) *cobra.Command {
 				fmt.Printf("Due at:     %s\n", dueAt)
 			}
 
-			fmt.Printf("\nTo approve: axme tasks approve %s\n", intentID)
-			fmt.Printf("To reject:  axme tasks reject %s\n", intentID)
+			// Type-aware action hints
+			taskType := asString(ht["task_type"])
+			fmt.Println()
+			switch taskType {
+			case "review":
+				fmt.Printf("To approve:          axme tasks approve %s\n", intentID)
+				fmt.Printf("To request changes:  axme tasks submit %s --outcome changes_requested --comment \"...\"\n", intentID)
+				fmt.Printf("To reject:           axme tasks reject %s\n", intentID)
+			case "clarification":
+				fmt.Printf("To provide:  axme tasks submit %s --outcome provided --data-json '{...}'\n", intentID)
+				fmt.Printf("To reject:   axme tasks reject %s\n", intentID)
+			case "manual_action":
+				fmt.Printf("To complete: axme tasks complete %s\n", intentID)
+				fmt.Printf("To fail:     axme tasks submit %s --outcome failed --comment \"...\"\n", intentID)
+			case "confirmation":
+				fmt.Printf("To confirm: axme tasks confirm %s\n", intentID)
+				fmt.Printf("To deny:    axme tasks reject %s\n", intentID)
+			case "assignment":
+				fmt.Printf("To assign:  axme tasks assign %s --data assignee=user@example.com\n", intentID)
+				fmt.Printf("To decline: axme tasks submit %s --outcome declined\n", intentID)
+			case "override":
+				fmt.Printf("To approve override: axme tasks submit %s --outcome override_approved --comment \"...\"\n", intentID)
+				fmt.Printf("To reject:           axme tasks reject %s\n", intentID)
+			default:
+				fmt.Printf("To approve: axme tasks approve %s\n", intentID)
+				fmt.Printf("To reject:  axme tasks reject %s\n", intentID)
+			}
 			return nil
 		},
 	}
@@ -197,6 +225,69 @@ func newTasksRejectCmd(rt *runtime) *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&comment, "comment", "c", "", "Reason for rejecting the task")
 	cmd.Flags().StringToStringVar(&data, "data", nil, "Additional key=value data fields in task_result")
+	return cmd
+}
+
+// ---------------------------------------------------------------------------
+// axme tasks confirm <intent_id> [--comment <text>]
+// ---------------------------------------------------------------------------
+
+func newTasksConfirmCmd(rt *runtime) *cobra.Command {
+	var comment string
+	var data map[string]string
+
+	cmd := &cobra.Command{
+		Use:   "confirm <intent_id>",
+		Short: "Confirm a pending task (submits task_result with outcome=confirmed)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return submitTaskResult(rt, cmd, args[0], "confirmed", comment, data)
+		},
+	}
+	cmd.Flags().StringVarP(&comment, "comment", "c", "", "Optional comment")
+	cmd.Flags().StringToStringVar(&data, "data", nil, "Additional key=value data fields in task_result")
+	return cmd
+}
+
+// ---------------------------------------------------------------------------
+// axme tasks complete <intent_id> [--comment <text>]
+// ---------------------------------------------------------------------------
+
+func newTasksCompleteCmd(rt *runtime) *cobra.Command {
+	var comment string
+	var data map[string]string
+
+	cmd := &cobra.Command{
+		Use:   "complete <intent_id>",
+		Short: "Mark a manual_action task as completed (submits task_result with outcome=completed)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return submitTaskResult(rt, cmd, args[0], "completed", comment, data)
+		},
+	}
+	cmd.Flags().StringVarP(&comment, "comment", "c", "", "Optional comment")
+	cmd.Flags().StringToStringVar(&data, "data", nil, "Additional key=value data fields in task_result")
+	return cmd
+}
+
+// ---------------------------------------------------------------------------
+// axme tasks assign <intent_id> [--comment <text>] [--data k=v...]
+// ---------------------------------------------------------------------------
+
+func newTasksAssignCmd(rt *runtime) *cobra.Command {
+	var comment string
+	var data map[string]string
+
+	cmd := &cobra.Command{
+		Use:   "assign <intent_id>",
+		Short: "Assign a task to a responsible party (submits task_result with outcome=assigned)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return submitTaskResult(rt, cmd, args[0], "assigned", comment, data)
+		},
+	}
+	cmd.Flags().StringVarP(&comment, "comment", "c", "", "Optional comment")
+	cmd.Flags().StringToStringVar(&data, "data", nil, "Additional key=value data fields (e.g. --data assignee=user@example.com)")
 	return cmd
 }
 
