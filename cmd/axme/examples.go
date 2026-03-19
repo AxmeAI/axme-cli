@@ -199,9 +199,30 @@ func (rt *runtime) runExample(cmd *cobra.Command, exampleID string) error {
 	}
 	fmt.Println("            ✓ Scenario loaded")
 
-	// Step 2: Apply scenario (provision agents + create intent)
+	// Step 2: Provision agent service accounts + keys
+	if len(example.Agents) > 0 {
+		fmt.Println()
+		fmt.Println("  [step 2]  Provisioning agents...")
+		var provEntries []agentProvisionEntry
+		for _, a := range example.Agents {
+			provEntries = append(provEntries, agentProvisionEntry{
+				Address:         a.Addr,
+				DisplayName:     a.Addr,
+				CreateIfMissing: true,
+			})
+		}
+		store, changed := rt.provisionAgents(ctx, c, provEntries)
+		if changed {
+			if err := saveScenarioAgentsStore(store); err != nil {
+				fmt.Fprintf(os.Stderr, "            warning: could not save agent credentials: %v\n", err)
+			}
+		}
+		fmt.Printf("            ✓ %d agent(s) provisioned\n", len(example.Agents))
+	}
+
+	// Step 3: Apply scenario (create intent via server-side apply)
 	fmt.Println()
-	fmt.Println("  [step 2]  Provisioning agents...")
+	fmt.Println("  [step 3]  Submitting scenario...")
 	applyStatus, applyBody, _, applyErr := rt.request(ctx, c, "POST", "/v1/scenarios/apply",
 		nil, scenario, true)
 	if applyErr != nil {
@@ -216,11 +237,11 @@ func (rt *runtime) runExample(cmd *cobra.Command, exampleID string) error {
 	}
 	fmt.Printf("            ✓ Intent created: %s\n", intentID)
 
-	// Step 3: Start built-in Go agents
+	// Step 4: Start built-in Go agents
 	if len(example.Agents) > 0 {
 		fmt.Println()
 		for i, agent := range example.Agents {
-			fmt.Printf("  [step 3]  Starting agent %d/%d (%s)...\n", i+1, len(example.Agents), agent.Addr)
+			fmt.Printf("  [step 4]  Starting agent %d/%d (%s)...\n", i+1, len(example.Agents), agent.Addr)
 			go rt.runBuiltinAgent(ctx, c, &agent)
 		}
 		fmt.Printf("            ✓ %d agent(s) listening\n", len(example.Agents))
