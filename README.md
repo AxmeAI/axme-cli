@@ -201,6 +201,30 @@ axme intents retry <intent_id>
 axme intents resume <intent_id>
 ```
 
+### Human Tasks
+
+Resolve human-in-the-loop steps from the terminal. AXME supports 8 task types: `approval`, `confirmation`, `review`, `assignment`, `form`, `clarification`, `manual_action`, `override`.
+
+```bash
+axme tasks list                       # list pending human tasks
+axme tasks get <intent_id>            # show task details and allowed outcomes
+axme tasks approve <intent_id>        # approve (approval, review)
+axme tasks reject <intent_id>         # reject (approval, review, override)
+axme tasks confirm <intent_id>        # confirm (confirmation)
+axme tasks complete <intent_id>       # complete (manual_action)
+axme tasks assign <intent_id>         # assign (assignment)
+axme tasks submit <intent_id> \       # generic: any outcome + data
+  --outcome provided \
+  --comment "Here is the info you requested"
+```
+
+### Scenarios
+
+```bash
+axme scenarios apply scenario.json              # provision agents + submit intent
+axme scenarios apply scenario.json --watch       # same + stream lifecycle events
+```
+
 ### Agents and Registry
 ```bash
 axme agents list
