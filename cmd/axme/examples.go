@@ -233,7 +233,7 @@ func (rt *runtime) runExample(cmd *cobra.Command, exampleID string) error {
 // runBuiltinAgent listens for intents via SSE stream and processes them
 // using the agent's built-in Go handler. Runs in a goroutine.
 func (rt *runtime) runBuiltinAgent(ctx context.Context, c *clientConfig, agent *agentDef) {
-	agentKey := rt.loadAgentKey(agent.NameFragment)
+	agentKey := rt.loadAgentKey(agent.NameFragment, c.BaseURL)
 	if agentKey == "" {
 		fmt.Fprintf(os.Stderr, "\n  [agent] warning: no API key found for %s\n", agent.NameFragment)
 		return
@@ -349,7 +349,7 @@ func (rt *runtime) processAgentIntent(ctx context.Context, agentCtx *clientConfi
 		nil, result, true)
 }
 
-func (rt *runtime) loadAgentKey(nameFragment string) string {
+func (rt *runtime) loadAgentKey(nameFragment, baseURL string) string {
 	home, _ := os.UserHomeDir()
 	path := home + "/.config/axme/scenario-agents.json"
 	raw, err := os.ReadFile(path)
@@ -364,17 +364,26 @@ func (rt *runtime) loadAgentKey(nameFragment string) string {
 	if !ok {
 		return ""
 	}
+	normalBase := strings.TrimRight(baseURL, "/")
+	var fallback string
 	for _, a := range agents {
 		agent, ok := a.(map[string]interface{})
 		if !ok {
 			continue
 		}
 		addr := asString(agent["address"])
-		if strings.Contains(addr, nameFragment) {
+		if !strings.Contains(addr, nameFragment) {
+			continue
+		}
+		storedBase := strings.TrimRight(asString(agent["base_url"]), "/")
+		if storedBase == normalBase {
 			return asString(agent["api_key"])
 		}
+		if fallback == "" {
+			fallback = asString(agent["api_key"])
+		}
 	}
-	return ""
+	return fallback
 }
 
 func httpGet(url string) ([]byte, error) {
