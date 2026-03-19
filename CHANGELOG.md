@@ -6,6 +6,15 @@ This project follows [Semantic Versioning](https://semver.org/). During alpha (`
 
 ---
 
+## [v0.2.6] — 2026-03-19
+
+### Fixed
+- Environment variable override (`AXME_BASE_URL`, `AXME_API_KEY`) now correctly applies in fresh contexts when a saved context already has a non-localhost base URL
+- `axme examples run` now picks agent keys matching the active environment (`base_url`) — staging and prod keys no longer conflict when both exist in `scenario-agents.json`
+
+### Changed
+- Command reference updated: Human Tasks and Scenarios sections added
+
 ## [v0.2.5] — 2026-03-19
 
 ### Added
