@@ -6,6 +6,23 @@ This project follows [Semantic Versioning](https://semver.org/). During alpha (`
 
 ---
 
+## [v0.2.5] — 2026-03-19
+
+### Added
+- Type-aware task hints — `axme intents get` shows contextual next-step commands based on task type (approval, review, form, etc.)
+- Shortcut commands: `axme intents confirm`, `axme intents complete`, `axme intents assign` for common human task outcomes
+
+### Fixed
+- Environment variable override (`AXME_BASE_URL`, `AXME_API_KEY`) now works even when a saved context exists with a non-localhost base URL
+
+### Changed
+- README updated: replaced alpha access section with Quick Start reference
+
+## [v0.2.4] — 2026-03-18
+
+### Fixed
+- SA credential cache scoped by `base_url` — staging and prod credentials no longer conflict
+
 ## [v0.2.3] — 2026-03-10
 
 ### Fixed
