@@ -4325,15 +4325,21 @@ func (rt *runtime) effectiveContextWithSecrets() (*clientConfig, error) {
 	}
 	merged := *active
 	merged.normalizeActorToken()
-	if merged.BaseURL == "" {
+	if merged.BaseURL == "" || merged.BaseURL == defaultLocalAPIBaseURL {
 		if v := strings.TrimSpace(os.Getenv("AXME_PORTAL_BASE_URL")); v != "" {
 			merged.BaseURL = strings.TrimRight(v, "/")
 		} else if v := strings.TrimSpace(os.Getenv("AXME_GATEWAY_BASE_URL")); v != "" {
 			merged.BaseURL = strings.TrimRight(v, "/")
+		} else if v := strings.TrimSpace(os.Getenv("AXME_BASE_URL")); v != "" {
+			merged.BaseURL = strings.TrimRight(v, "/")
 		}
 	}
 	if merged.APIKey == "" {
-		merged.APIKey = strings.TrimSpace(os.Getenv("AXME_GATEWAY_API_KEY"))
+		if v := strings.TrimSpace(os.Getenv("AXME_GATEWAY_API_KEY")); v != "" {
+			merged.APIKey = v
+		} else if v := strings.TrimSpace(os.Getenv("AXME_API_KEY")); v != "" {
+			merged.APIKey = v
+		}
 	}
 	if merged.ActorToken == "" {
 		merged.ActorToken = strings.TrimSpace(os.Getenv("AXME_ACTOR_TOKEN"))
