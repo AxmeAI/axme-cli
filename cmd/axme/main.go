@@ -2213,6 +2213,7 @@ func newAgentsCmd(rt *runtime) *cobra.Command {
 		newAgentsRegisterCmd(rt),
 		newAgentsDeleteCmd(rt),
 		newAgentsKeysCmd(rt),
+		newAgentsPolicyCmd(rt),
 	)
 	return cmd
 }
