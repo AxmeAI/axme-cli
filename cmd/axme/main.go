@@ -15,7 +15,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	stdruntime "runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -1642,14 +1641,20 @@ func newIntentsCmd(rt *runtime) *cobra.Command {
 }
 
 func newIntentsListCmd(rt *runtime) *cobra.Command {
-	var statusFilter, since, service, tag string
+	var statusFilter string
 	var limit int
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List intents",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := rt.effectiveContext()
-			status, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/inbox", nil, nil, true)
+			query := map[string]string{
+				"limit": fmt.Sprintf("%d", limit),
+			}
+			if statusFilter != "" {
+				query["status"] = statusFilter
+			}
+			status, body, _, err := rt.request(cmd.Context(), ctx, "GET", "/v1/intents", query, nil, true)
 			if err != nil {
 				return err
 			}
@@ -1660,63 +1665,28 @@ func newIntentsListCmd(rt *runtime) *cobra.Command {
 					detail = asString(errorBody["message"])
 				}
 				if strings.TrimSpace(detail) == "" {
-					return &cliError{Code: 1, Msg: "failed to list inbox threads"}
+					return &cliError{Code: 1, Msg: "failed to list intents"}
 				}
-				if status == 401 || strings.Contains(detail, "token") || strings.Contains(detail, "bearer") {
-					return &cliError{Code: 1, Msg: sessionExpiredMessage()}
-				}
-				return &cliError{Code: 1, Msg: fmt.Sprintf("failed to list inbox threads: %s", detail)}
+				return &cliError{Code: 1, Msg: fmt.Sprintf("failed to list intents: %s", detail)}
 			}
-			threads := asSlice(body["threads"])
-			rows := make([]intentRow, 0, len(threads))
-			sinceAt, hasSince := parseSince(since)
-			for _, raw := range threads {
-				t := asMap(raw)
-				intentID := asString(t["intent_id"])
+			intents := asSlice(body["intents"])
+			rows := make([]intentRow, 0, len(intents))
+			for _, raw := range intents {
+				intent := asMap(raw)
+				intentID := asString(intent["intent_id"])
 				if intentID == "" {
 					continue
 				}
-				_, ibody, _, ierr := rt.request(cmd.Context(), ctx, "GET", "/v1/intents/"+intentID, nil, nil, true)
-				if ierr != nil {
-					continue
-				}
-				intent := asMap(ibody["intent"])
 				intentStatus := strings.ToUpper(asString(intent["status"]))
-				if statusFilter != "" && strings.ToUpper(statusFilter) != intentStatus {
-					continue
-				}
-				updated := asString(intent["updated_at"])
-				if hasSince && updated != "" {
-					if ts, err := time.Parse(time.RFC3339, updated); err == nil && ts.Before(sinceAt) {
-						continue
-					}
-				}
-				payload := asMap(intent["payload"])
-				if service != "" && asString(payload["service"]) != service {
-					continue
-				}
-				if tag != "" {
-					tags := asStringSlice(payload["tags"])
-					if !slices.Contains(tags, tag) {
-						continue
-					}
-				}
 				row := intentRow{
 					ID:        intentID,
 					Status:    intentStatus,
 					Age:       ageFromTime(asString(intent["updated_at"]), asString(intent["created_at"])),
-					LastStep:  asString(intent["lifecycle_status"]),
+					LastStep:  intentStatus,
 					Owner:     asString(intent["to_agent"]),
 					UpdatedAt: asString(intent["updated_at"]),
-					Payload:   payload,
-				}
-				if row.LastStep == "" {
-					row.LastStep = row.Status
 				}
 				rows = append(rows, row)
-			}
-			if limit > 0 && len(rows) > limit {
-				rows = rows[:limit]
 			}
 			if rt.outputJSON {
 				return rt.printJSON(rows)
@@ -1732,10 +1702,7 @@ func newIntentsListCmd(rt *runtime) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&statusFilter, "status", "", "filter by lifecycle status")
-	cmd.Flags().StringVar(&since, "since", "", "RFC3339 timestamp or duration (e.g. 2h)")
 	cmd.Flags().IntVar(&limit, "limit", 50, "max items")
-	cmd.Flags().StringVar(&service, "service", "", "filter by payload.service")
-	cmd.Flags().StringVar(&tag, "tag", "", "filter by payload tag")
 	return cmd
 }
 
