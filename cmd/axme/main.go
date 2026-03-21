@@ -2447,23 +2447,50 @@ func newAgentsDeleteCmd(rt *runtime) *cobra.Command {
 	var yes bool
 
 	cmd := &cobra.Command{
-		Use:   "delete <service-account-id>",
+		Use:   "delete <agent-address-or-sa-id>",
 		Short: "Delete an agent (service account) and revoke all its keys",
-		Long: `Delete an agent by its service account ID. All active API keys for this agent
-are revoked before deletion. This action cannot be undone.
+		Long: `Delete an agent by its agent address or service account ID.
+All active API keys for this agent are revoked before deletion.
+This action cannot be undone.
 
-Use 'axme agents list' to find the service account ID.`,
-		Example: `  axme agents delete sa_abc123
+Accepts both agent addresses (agent://org/workspace/name) and
+service account IDs (sa_xxx).`,
+		Example: `  axme agents delete agent://acme-corp/production/approver
+  axme agents delete sa_abc123
   axme agents delete sa_abc123 --yes`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			saID := strings.TrimSpace(args[0])
-			if saID == "" {
-				return fmt.Errorf("service-account-id is required")
+			identifier := strings.TrimSpace(args[0])
+			if identifier == "" {
+				return fmt.Errorf("agent address or service-account-id is required")
+			}
+
+			ctx := rt.effectiveContext()
+			saID := identifier
+
+			// If the argument looks like an agent address, resolve it to a service account ID.
+			if strings.HasPrefix(identifier, "agent://") || strings.Contains(identifier, "/") {
+				pathPart := strings.TrimPrefix(identifier, "agent://")
+				lookupStatus, lookupBody, _, lookupErr := rt.request(cmd.Context(), ctx, "GET", "/v1/agents/"+pathPart, nil, nil, true)
+				if lookupErr != nil {
+					return lookupErr
+				}
+				if lookupStatus >= 400 {
+					return fmt.Errorf("agent not found: %s", identifier)
+				}
+				agentMap, _ := lookupBody["agent"].(map[string]interface{})
+				if agentMap == nil {
+					return fmt.Errorf("unexpected response from agent lookup")
+				}
+				resolved, _ := agentMap["service_account_id"].(string)
+				if resolved == "" {
+					return fmt.Errorf("could not resolve service account ID for %s", identifier)
+				}
+				saID = resolved
 			}
 
 			if !yes && !rt.outputJSON {
-				fmt.Fprintf(os.Stderr, "  Delete agent %q and revoke all its keys? [y/N]: ", saID)
+				fmt.Fprintf(os.Stderr, "  Delete agent %q and revoke all its keys? [y/N]: ", identifier)
 				reader := bufio.NewReader(os.Stdin)
 				line, _ := reader.ReadString('\n')
 				if strings.ToLower(strings.TrimSpace(line)) != "y" {
@@ -2472,7 +2499,6 @@ Use 'axme agents list' to find the service account ID.`,
 				}
 			}
 
-			ctx := rt.effectiveContext()
 			status, body, raw, err := rt.request(cmd.Context(), ctx, "DELETE", "/v1/service-accounts/"+saID, nil, nil, true)
 			if err != nil {
 				return err
@@ -2485,7 +2511,7 @@ Use 'axme agents list' to find the service account ID.`,
 				return nil
 			}
 			_ = body
-			fmt.Printf("  Agent %s deleted.\n", saID)
+			fmt.Printf("  Agent %s deleted.\n", identifier)
 			return nil
 		},
 	}
