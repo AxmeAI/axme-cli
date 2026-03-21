@@ -6,6 +6,15 @@ This project follows [Semantic Versioning](https://semver.org/). During alpha (`
 
 ---
 
+## [v0.2.7] — 2026-03-21
+
+### Added
+- `agents policy` commands: `get`, `set`, `add`, `remove` for managing agent send policies (#57)
+- `examples run` auto-provisions agent service accounts — no manual setup needed (#56)
+
+### Fixed
+- `intents list` now uses `GET /v1/intents` (x-api-key scoped) instead of `GET /v1/inbox` (bearer-only) — fixes timeout in CI and non-login environments (#58)
+
 ## [v0.2.6] — 2026-03-19
 
 ### Fixed
