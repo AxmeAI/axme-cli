@@ -267,9 +267,8 @@ func (rt *runtime) runBuiltinAgent(ctx context.Context, c *clientConfig, agent *
 	baseURL := strings.TrimRight(c.BaseURL, "/")
 
 	// Skip past all old intents: quick SSE request with short timeout to find max cursor.
-	// Uses a 3-second context deadline so it doesn't block on large backlogs.
 	since := 0
-	initCtx, initCancel := context.WithTimeout(ctx, 3*time.Second)
+	initCtx, initCancel := context.WithTimeout(ctx, 1*time.Second)
 	initReq, _ := http.NewRequestWithContext(initCtx, "GET",
 		fmt.Sprintf("%s/v1/agents/%s/intents/stream?since=0&wait_seconds=1", baseURL, agent.Addr), nil)
 	if initReq != nil {
@@ -298,7 +297,7 @@ func (rt *runtime) runBuiltinAgent(ctx context.Context, c *clientConfig, agent *
 		}
 
 		// Connect to SSE stream
-		streamURL := fmt.Sprintf("%s/v1/agents/%s/intents/stream?since=%d&wait_seconds=5",
+		streamURL := fmt.Sprintf("%s/v1/agents/%s/intents/stream?since=%d&wait_seconds=2",
 			baseURL, agent.Addr, since)
 		req, err := http.NewRequestWithContext(ctx, "GET", streamURL, nil)
 		if err != nil {
