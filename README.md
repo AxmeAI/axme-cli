@@ -228,8 +228,41 @@ axme scenarios apply scenario.json --watch       # same + stream lifecycle event
 ### Agents and Registry
 ```bash
 axme agents list
-axme agents register --name "<name>" --capability "<capability>" --endpoint-url "<url>"
-axme agents resolve "@name"
+axme agents register --name "<name>"
+axme agents show <address>
+axme agents delete <service_account_id>
+axme agents keys create --agent-id <sa_id>
+axme agents keys revoke --agent-id <sa_id> --key-id <sak_id>
+```
+
+### Agent Send Policies
+```bash
+axme agents policy get <address>                              # show send policy (default: open)
+axme agents policy set <address> <open|allowlist|denylist>    # set send policy mode
+axme agents policy add <address> <sender_pattern>             # add pattern to allowlist/denylist
+axme agents policy remove <address> <entry_id>                # remove pattern entry
+```
+
+### Org Receive Policy (Cross-Org Intent Delivery)
+
+Control which external organizations can send intents to your org. Default: `closed` (no cross-org inbound).
+
+```bash
+axme org receive-policy get                                   # show org receive policy
+axme org receive-policy set <open|allowlist|closed>           # set receive policy mode
+axme org receive-policy add <sender_pattern>                  # add sender to allowlist
+axme org receive-policy remove <entry_id>                     # remove allowlist entry
+```
+
+### Agent Receive Override
+
+Per-agent exception to the org receive policy. Enables "public agents" in a closed org.
+
+```bash
+axme agents receive-override get <address>                                       # show override (default: use_org_default)
+axme agents receive-override set <address> <open|allowlist|closed|use_org_default>  # set override
+axme agents receive-override add <address> <sender_pattern>                      # add to agent allowlist
+axme agents receive-override remove <address> <entry_id>                         # remove entry
 ```
 
 ### Organizations and Workspaces
