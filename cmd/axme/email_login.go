@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // runEmailLogin implements the email-first passwordless login flow:
@@ -41,6 +42,7 @@ func (rt *runtime) runEmailLogin(ctx context.Context, ctxName string) error {
 	}
 
 	intentID := asString(body["intent_id"])
+	grantID := asString(body["grant_id"])
 	expiresIn := int(asFloat(body["expires_in"]))
 	if expiresIn <= 0 {
 		expiresIn = 300
@@ -50,49 +52,99 @@ func (rt *runtime) runEmailLogin(ctx context.Context, ctxName string) error {
 		_ = rt.printJSON(map[string]any{
 			"ok":        true,
 			"intent_id": intentID,
-			"message":   "check your email for a 6-digit code and enter it at the prompt",
+			"message":   "check your email for a 6-digit code or click the magic link",
 		})
 	} else {
 		fmt.Fprintln(os.Stderr, "  Code sent! Check your inbox.")
 		fmt.Fprintln(os.Stderr)
-		fmt.Fprintf(os.Stderr, "  The code expires in %ds. Enter it below.\n", expiresIn)
+		fmt.Fprintf(os.Stderr, "  Enter the 6-digit code below, or click the magic link in the email.\n")
+		fmt.Fprintf(os.Stderr, "  The code expires in %ds.\n", expiresIn)
 		fmt.Fprintln(os.Stderr)
 	}
 
-	// Prompt for OTP code
-	otp, err := rt.promptOTP()
-	if err != nil {
-		return err
+	// Run OTP prompt and magic link polling in parallel.
+	// Whichever completes first wins.
+	type loginResult struct {
+		body map[string]any
+		err  error
 	}
+	resultCh := make(chan loginResult, 2)
+	pollCtx, pollCancel := context.WithCancel(ctx)
+	defer pollCancel()
+
+	// Goroutine 1: poll grant status (magic link path)
+	if grantID != "" {
+		go func() {
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-pollCtx.Done():
+					return
+				case <-ticker.C:
+					pollStatus, pollBody, _, pollErr := rt.request(pollCtx, c, "GET",
+						"/v1/auth/cli-grants/"+grantID, nil, nil, true)
+					if pollErr != nil {
+						continue
+					}
+					if pollStatus == 200 && asString(pollBody["state"]) == "approved" {
+						resultCh <- loginResult{body: pollBody}
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	// Goroutine 2: OTP prompt (blocking stdin read)
+	go func() {
+		otp, otpErr := rt.promptOTP()
+		if otpErr != nil {
+			resultCh <- loginResult{err: otpErr}
+			return
+		}
+		verifyStatus, verifyBody, verifyRaw, verifyErr := rt.request(
+			ctx, c,
+			"POST", "/v1/auth/login-intent/"+intentID+"/verify",
+			nil, map[string]any{"code": otp}, true,
+		)
+		if verifyErr != nil {
+			resultCh <- loginResult{err: fmt.Errorf("login: could not verify code: %w", verifyErr)}
+			return
+		}
+		switch verifyStatus {
+		case 410:
+			resultCh <- loginResult{err: fmt.Errorf("login: the sign-in code has expired — run `axme login` again")}
+			return
+		case 422:
+			detail := asString(verifyBody["detail"])
+			if detail == "" {
+				detail = string(verifyRaw)
+			}
+			resultCh <- loginResult{err: fmt.Errorf("login: invalid code — %s", detail)}
+			return
+		case 409:
+			resultCh <- loginResult{err: fmt.Errorf("login: code already used — run `axme login` again")}
+			return
+		}
+		if verifyStatus >= 400 {
+			resultCh <- loginResult{err: fmt.Errorf("login: verification failed (%d): %s", verifyStatus, verifyRaw)}
+			return
+		}
+		resultCh <- loginResult{body: verifyBody}
+	}()
+
+	// Wait for first successful result
+	res := <-resultCh
+	pollCancel() // stop grant polling
+	if res.err != nil {
+		return res.err
+	}
+	verifyBody := res.body
 
 	if !rt.outputJSON {
 		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "  Verifying code...")
-	}
-
-	// Verify OTP
-	verifyStatus, verifyBody, verifyRaw, verifyErr := rt.request(
-		ctx, c,
-		"POST", "/v1/auth/login-intent/"+intentID+"/verify",
-		nil, map[string]any{"code": otp}, true,
-	)
-	if verifyErr != nil {
-		return fmt.Errorf("login: could not verify code: %w", verifyErr)
-	}
-	switch verifyStatus {
-	case 410:
-		return fmt.Errorf("login: the sign-in code has expired — run `axme login` again")
-	case 422:
-		detail := asString(verifyBody["detail"])
-		if detail == "" {
-			detail = string(verifyRaw)
-		}
-		return fmt.Errorf("login: invalid code — %s", detail)
-	case 409:
-		return fmt.Errorf("login: code already used — run `axme login` again")
-	}
-	if verifyStatus >= 400 {
-		return fmt.Errorf("login: verification failed (%d): %s", verifyStatus, verifyRaw)
+		fmt.Fprintln(os.Stderr, "  Sign-in successful!")
 	}
 
 	retrievedKey := asString(verifyBody["api_key"])
