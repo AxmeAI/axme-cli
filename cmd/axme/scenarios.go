@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -91,6 +92,8 @@ func (rt *runtime) provisionAgents(
 ) (store scenarioAgentsStore, storeChanged bool) {
 	store = loadScenarioAgentsStore()
 
+	// Filter agents that need provisioning
+	var needsWork []agentProvisionEntry
 	for _, agent := range agents {
 		if !agent.CreateIfMissing {
 			continue
@@ -99,110 +102,144 @@ func (rt *runtime) provisionAgents(
 			fmt.Printf("            skipping SA provision for %s — run 'axme login' first\n", agent.Address)
 			continue
 		}
-
-		// Check if SA already exists by name
-		statusCode, body, _, err := rt.request(
-			ctx, cc, "GET",
-			"/v1/service-accounts?org_id="+cc.OrgID+"&workspace_id="+cc.WorkspaceID,
-			nil, nil, true,
-		)
-		existingSAID := ""
-		existingAddress := ""
-		if err == nil && statusCode == 200 {
-			for _, raw := range asSlice(body["service_accounts"]) {
-				sa := asMap(raw)
-				if asString(sa["name"]) == agent.Address {
-					existingSAID = asString(sa["service_account_id"])
-					existingAddress = asString(sa["address"])
-					break
-				}
+		// Fast path: skip HTTP entirely if local store already has a valid key
+		hasLocalKey := false
+		for _, a := range store.Agents {
+			if a.Address == agent.Address && a.APIKey != "" && a.BaseURL == cc.BaseURL {
+				hasLocalKey = true
+				break
 			}
 		}
+		if hasLocalKey {
+			continue
+		}
+		needsWork = append(needsWork, agent)
+	}
 
-		if existingSAID != "" {
-			hasLocalKey := false
-			for _, a := range store.Agents {
-				if a.Address == agent.Address && a.APIKey != "" && a.BaseURL == cc.BaseURL {
-					hasLocalKey = true
-					break
-				}
-			}
-			if hasLocalKey {
-				continue
-			}
-			kStatus, kBody, _, kErr := rt.request(ctx, cc, "POST",
-				"/v1/service-accounts/"+existingSAID+"/keys", nil, map[string]interface{}{}, true)
-			if kErr != nil || kStatus >= 400 {
-				fmt.Fprintf(os.Stderr, "            warning: could not create key for %s: %s\n",
-					agent.Address, asString(kBody["detail"]))
-			} else {
-				keyObj := asMap(kBody["key"])
-				creds := scenarioAgentCreds{
-					Address:          agent.Address,
-					ServiceAccountID: existingSAID,
-					KeyID:            asString(keyObj["key_id"]),
-					APIKey:           asString(keyObj["token"]),
-					CreatedAt:        asString(keyObj["created_at"]),
-					BaseURL:          cc.BaseURL,
-				}
-				if existingAddress != "" {
-					creds.Address = existingAddress
-				}
-				upsertScenarioAgent(&store, creds)
+	if len(needsWork) == 0 {
+		return store, storeChanged
+	}
+
+	// Fetch SA list once (shared across all agents)
+	var saList []interface{}
+	statusCode, body, _, err := rt.request(
+		ctx, cc, "GET",
+		"/v1/service-accounts?org_id="+cc.OrgID+"&workspace_id="+cc.WorkspaceID,
+		nil, nil, true,
+	)
+	if err == nil && statusCode == 200 {
+		saList = asSlice(body["service_accounts"])
+	}
+
+	// Provision agents in parallel
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, agent := range needsWork {
+		wg.Add(1)
+		go func(agent agentProvisionEntry) {
+			defer wg.Done()
+			creds := rt.provisionSingleAgent(ctx, cc, agent, saList)
+			if creds != nil {
+				mu.Lock()
+				upsertScenarioAgent(&store, *creds)
 				storeChanged = true
+				mu.Unlock()
 			}
-			continue
-		}
+		}(agent)
+	}
+	wg.Wait()
+	return store, storeChanged
+}
 
-		// SA does not exist — create it
-		saPayload := map[string]interface{}{
-			"name":         agent.Address,
-			"display_name": agent.DisplayName,
-			"org_id":       cc.OrgID,
-			"workspace_id": cc.WorkspaceID,
-		}
-		cStatus, cBody, _, cErr := rt.request(ctx, cc, "POST", "/v1/service-accounts", nil, saPayload, true)
-		if cErr != nil || (cStatus >= 400 && cStatus != 409) {
-			fmt.Fprintf(os.Stderr, "            warning: could not create SA %s: %s\n",
-				agent.Address, asString(cBody["detail"]))
-			continue
-		}
-		saObj := asMap(cBody["service_account"])
-		saID := asString(saObj["service_account_id"])
-		if saID == "" {
-			saID = asString(saObj["id"])
-		}
-		saAddr := asString(saObj["address"])
-
-		if saID == "" {
-			fmt.Fprintf(os.Stderr, "            warning: no sa_id for %s — skipping key creation\n", agent.Address)
-			continue
-		}
-
-		kStatus, kBody, _, kErr := rt.request(ctx, cc, "POST",
-			"/v1/service-accounts/"+saID+"/keys", nil, map[string]interface{}{}, true)
-		if kErr != nil || kStatus >= 400 {
-			fmt.Fprintf(os.Stderr, "            warning: key creation failed for %s: %s\n",
-				agent.Address, asString(kBody["detail"]))
-		} else {
-			keyObj := asMap(kBody["key"])
-			addrToStore := saAddr
-			if addrToStore == "" {
-				addrToStore = agent.Address
-			}
-			creds := scenarioAgentCreds{
-				Address:          addrToStore,
-				ServiceAccountID: saID,
-				KeyID:            asString(keyObj["key_id"]),
-				APIKey:           asString(keyObj["token"]),
-				CreatedAt:        asString(keyObj["created_at"]),
-				BaseURL:          cc.BaseURL,
-			}
-			upsertScenarioAgent(&store, creds)
-			storeChanged = true
+// provisionSingleAgent provisions a single agent — finds or creates SA + key.
+func (rt *runtime) provisionSingleAgent(
+	ctx context.Context,
+	cc *clientConfig,
+	agent agentProvisionEntry,
+	saList []interface{},
+) *scenarioAgentCreds {
+	// Look up existing SA from pre-fetched list
+	existingSAID := ""
+	existingAddress := ""
+	for _, raw := range saList {
+		sa := asMap(raw)
+		if asString(sa["name"]) == agent.Address {
+			existingSAID = asString(sa["service_account_id"])
+			existingAddress = asString(sa["address"])
+			break
 		}
 	}
-	return store, storeChanged
+
+	if existingSAID != "" {
+		// SA exists — create a key
+		kStatus, kBody, _, kErr := rt.request(ctx, cc, "POST",
+			"/v1/service-accounts/"+existingSAID+"/keys", nil, map[string]interface{}{}, true)
+		if kErr != nil || kStatus >= 400 {
+			fmt.Fprintf(os.Stderr, "            warning: could not create key for %s: %s\n",
+				agent.Address, asString(kBody["detail"]))
+			return nil
+		}
+		keyObj := asMap(kBody["key"])
+		creds := scenarioAgentCreds{
+			Address:          agent.Address,
+			ServiceAccountID: existingSAID,
+			KeyID:            asString(keyObj["key_id"]),
+			APIKey:           asString(keyObj["token"]),
+			CreatedAt:        asString(keyObj["created_at"]),
+			BaseURL:          cc.BaseURL,
+		}
+		if existingAddress != "" {
+			creds.Address = existingAddress
+		}
+		return &creds
+	}
+
+	// SA does not exist — create it
+	saPayload := map[string]interface{}{
+		"name":         agent.Address,
+		"display_name": agent.DisplayName,
+		"org_id":       cc.OrgID,
+		"workspace_id": cc.WorkspaceID,
+	}
+	cStatus, cBody, _, cErr := rt.request(ctx, cc, "POST", "/v1/service-accounts", nil, saPayload, true)
+	if cErr != nil || (cStatus >= 400 && cStatus != 409) {
+		fmt.Fprintf(os.Stderr, "            warning: could not create SA %s: %s\n",
+			agent.Address, asString(cBody["detail"]))
+		return nil
+	}
+	saObj := asMap(cBody["service_account"])
+	saID := asString(saObj["service_account_id"])
+	if saID == "" {
+		saID = asString(saObj["id"])
+	}
+	saAddr := asString(saObj["address"])
+
+	if saID == "" {
+		fmt.Fprintf(os.Stderr, "            warning: no sa_id for %s — skipping key creation\n", agent.Address)
+		return nil
+	}
+
+	kStatus, kBody, _, kErr := rt.request(ctx, cc, "POST",
+		"/v1/service-accounts/"+saID+"/keys", nil, map[string]interface{}{}, true)
+	if kErr != nil || kStatus >= 400 {
+		fmt.Fprintf(os.Stderr, "            warning: key creation failed for %s: %s\n",
+			agent.Address, asString(kBody["detail"]))
+		return nil
+	}
+	keyObj := asMap(kBody["key"])
+	addrToStore := saAddr
+	if addrToStore == "" {
+		addrToStore = agent.Address
+	}
+	creds := scenarioAgentCreds{
+		Address:          addrToStore,
+		ServiceAccountID: saID,
+		KeyID:            asString(keyObj["key_id"]),
+		APIKey:           asString(keyObj["token"]),
+		CreatedAt:        asString(keyObj["created_at"]),
+		BaseURL:          cc.BaseURL,
+	}
+	return &creds
 }
 
 // ---------------------------------------------------------------------------
