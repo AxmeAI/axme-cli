@@ -776,6 +776,7 @@ func newOrgCmd(rt *runtime) *cobra.Command {
 				return nil
 			},
 		},
+		newOrgReceivePolicyCmd(rt),
 	)
 	return cmd
 }
@@ -2181,6 +2182,7 @@ func newAgentsCmd(rt *runtime) *cobra.Command {
 		newAgentsDeleteCmd(rt),
 		newAgentsKeysCmd(rt),
 		newAgentsPolicyCmd(rt),
+		newAgentsReceiveOverrideCmd(rt),
 	)
 	return cmd
 }
