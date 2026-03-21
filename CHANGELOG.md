@@ -6,6 +6,13 @@ This project follows [Semantic Versioning](https://semver.org/). During alpha (`
 
 ---
 
+## [v0.2.8] — 2026-03-21
+
+### Added
+- `org receive-policy` commands: `get`, `set`, `add`, `remove` for managing org-level receive policy (cross-org intent delivery) (#60)
+- `agents receive-override` commands: `get`, `set`, `add`, `remove` for per-agent receive policy exceptions (#60)
+- Updated README with full agent command reference and receive policy docs (#61)
+
 ## [v0.2.7] — 2026-03-21
 
 ### Added
