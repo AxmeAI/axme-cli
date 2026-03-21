@@ -6,6 +6,18 @@ This project follows [Semantic Versioning](https://semver.org/). During alpha (`
 
 ---
 
+## [v0.2.9] — 2026-03-21
+
+### Added
+- Magic link auto-login: click the link in email instead of typing OTP — CLI detects it automatically (#65)
+
+### Fixed
+- `agents delete` now accepts agent addresses (`agent://org/ws/name`) in addition to `sa_id` (#63)
+
+### Performance
+- Built-in agent SSE polling: `wait_seconds` 5→2, init sync 3s→1s — ~5s faster per workflow step (#64)
+- Agent provisioning: local key cache skip + parallel provisioning — step 2 from ~10s to <1s on repeat runs (#66)
+
 ## [v0.2.8] — 2026-03-21
 
 ### Added
