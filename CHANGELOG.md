@@ -6,6 +6,18 @@ This project follows [Semantic Versioning](https://semver.org/). During alpha (`
 
 ---
 
+## [v0.2.10] — 2026-03-24
+
+### Changed
+- Tier naming: `email_verified` → **Starter**, `corporate` → **Business** in all user-facing text (#69)
+- `--tier` flag accepts both old (`email_verified`, `corporate`) and new (`starter`, `business`) names
+- `quota show` displays friendly tier name (Starter/Business)
+
+### Fixed
+- 8 raw HTTP response body leaks replaced with user-friendly error messages (#68)
+- FastAPI validation error array parsing in CLI output
+- `--bearer-token` help text clarified
+
 ## [v0.2.9] — 2026-03-21
 
 ### Added
