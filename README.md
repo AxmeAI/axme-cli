@@ -62,7 +62,7 @@ Install or update to the latest release (Linux/macOS, no Go required):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AxmeAI/axme-cli/main/install.sh | sh
-source ~/.zshrc   # or open a new terminal
+# Open a new terminal, or run the "source" command shown by the installer
 ```
 
 The same command installs if you don't have the CLI, and upgrades to the latest release if you do. After install the CLI periodically checks for new versions in the background and prompts you to update.
