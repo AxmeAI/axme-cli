@@ -370,37 +370,19 @@ func (rt *runtime) processAgentIntent(ctx context.Context, agentCtx *clientConfi
 }
 
 func (rt *runtime) loadAgentKey(nameFragment, baseURL string) string {
-	home, _ := os.UserHomeDir()
-	path := home + "/.config/axme/scenario-agents.json"
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	var data map[string]interface{}
-	if err := json.Unmarshal(raw, &data); err != nil {
-		return ""
-	}
-	agents, ok := data["agents"].([]interface{})
-	if !ok {
-		return ""
-	}
+	store := loadScenarioAgentsStore()
 	normalBase := strings.TrimRight(baseURL, "/")
 	var fallback string
-	for _, a := range agents {
-		agent, ok := a.(map[string]interface{})
-		if !ok {
+	for _, a := range store.Agents {
+		if !strings.Contains(a.Address, nameFragment) {
 			continue
 		}
-		addr := asString(agent["address"])
-		if !strings.Contains(addr, nameFragment) {
-			continue
-		}
-		storedBase := strings.TrimRight(asString(agent["base_url"]), "/")
+		storedBase := strings.TrimRight(a.BaseURL, "/")
 		if storedBase == normalBase {
-			return asString(agent["api_key"])
+			return a.APIKey
 		}
 		if fallback == "" {
-			fallback = asString(agent["api_key"])
+			fallback = a.APIKey
 		}
 	}
 	return fallback
