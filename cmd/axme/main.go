@@ -162,7 +162,7 @@ func buildRoot(rt *runtime) *cobra.Command {
 	cmd.PersistentFlags().StringVar(&rt.overrideBase, "base-url", "", "gateway base URL override")
 	cmd.PersistentFlags().StringVar(&rt.overrideKey, "api-key", "", "gateway API key override")
 	cmd.PersistentFlags().StringVar(&rt.overrideJWT, "actor-token", "", "actor token override")
-	cmd.PersistentFlags().StringVar(&rt.overrideJWT, "bearer-token", "", "bearer token override")
+	cmd.PersistentFlags().StringVar(&rt.overrideJWT, "bearer-token", "", "bearer token override (alias for --actor-token)")
 	cmd.PersistentFlags().StringVar(&rt.overrideOrg, "org-id", "", "default org id override")
 	cmd.PersistentFlags().StringVar(&rt.overrideWs, "workspace-id", "", "default workspace id override")
 	cmd.PersistentFlags().StringVar(&rt.overrideOwn, "owner-agent", "", "owner agent override")
@@ -2823,7 +2823,7 @@ func newStatusCmd(rt *runtime) *cobra.Command {
 				return rt.printJSON(map[string]any{"status_code": status, "ok": status < 400, "body": body})
 			}
 			if status >= 400 {
-				return fmt.Errorf("gateway returned %d: %s", status, raw)
+				return &cliError{Code: 1, Msg: httpErrorMessage(status, raw)}
 			}
 			svc := asString(body["service"])
 			if svc == "" {
@@ -3460,9 +3460,27 @@ func httpErrorMessage(status int, raw string) string {
 				ResetAt   string `json:"reset_at"`
 			} `json:"details"`
 		} `json:"error"`
-		Detail string `json:"detail"`
+		Detail json.RawMessage `json:"detail"`
 	}
 	_ = json.Unmarshal([]byte(raw), &parsed)
+
+	// Extract detail as string — handles both string and array (FastAPI validation errors).
+	var detailStr string
+	if len(parsed.Detail) > 0 {
+		// Try as string first.
+		var s string
+		if json.Unmarshal(parsed.Detail, &s) == nil {
+			detailStr = s
+		} else {
+			// Try as array of validation errors [{msg: "..."}].
+			var arr []struct {
+				Msg string `json:"msg"`
+			}
+			if json.Unmarshal(parsed.Detail, &arr) == nil && len(arr) > 0 {
+				detailStr = arr[0].Msg
+			}
+		}
+	}
 
 	code := parsed.Error.Code
 	switch {
@@ -3475,7 +3493,7 @@ func httpErrorMessage(status int, raw string) string {
 	case status == 404:
 		msg := parsed.Error.Message
 		if msg == "" {
-			msg = parsed.Detail
+			msg = detailStr
 		}
 		if msg != "" {
 			return fmt.Sprintf("Not found: %s", msg)
@@ -3499,8 +3517,8 @@ func httpErrorMessage(status int, raw string) string {
 		if parsed.Error.Message != "" {
 			return fmt.Sprintf("Request failed (%d): %s", status, parsed.Error.Message)
 		}
-		if parsed.Detail != "" {
-			return fmt.Sprintf("Request failed (%d): %s", status, parsed.Detail)
+		if detailStr != "" {
+			return fmt.Sprintf("Request failed (%d): %s", status, detailStr)
 		}
 		return fmt.Sprintf("Request failed (%d).", status)
 	}
@@ -3529,7 +3547,7 @@ func (rt *runtime) personalContextFromServer(ctx context.Context, c *clientConfi
 		case status == 404 && strings.Contains(strings.ToLower(detail), "not bound to an organization/workspace context"):
 			return nil, &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
 		}
-		return nil, fmt.Errorf("personal context returned %d: %s", status, raw)
+		return nil, &cliError{Code: 1, Msg: httpErrorMessage(status, raw)}
 	}
 	return body, nil
 }
@@ -3889,7 +3907,7 @@ func (rt *runtime) personalWorkspaceSelectionAPIError(status int, body map[strin
 	case status == 403 && (errorCode == "invalid_actor_scope" || strings.Contains(strings.ToLower(detail), "actor identity")):
 		return &cliError{Code: 2, Msg: personalContextRequirementMessage(detail)}
 	}
-	return fmt.Errorf("workspace selection returned %d: %s", status, raw)
+	return &cliError{Code: 1, Msg: httpErrorMessage(status, raw)}
 }
 
 func enterpriseMemberRequirementMessage(_ string) string {
@@ -3930,7 +3948,7 @@ func (rt *runtime) enterpriseMembersAPIError(status int, body map[string]any, ra
 	case status == 429:
 		return &cliError{Code: 1, Msg: httpErrorMessage(status, raw)}
 	default:
-		return fmt.Errorf("enterprise member request returned %d: %s", status, raw)
+		return &cliError{Code: 1, Msg: httpErrorMessage(status, raw)}
 	}
 }
 
@@ -3962,7 +3980,7 @@ func (rt *runtime) serviceAccountsAPIError(status int, body map[string]any, raw 
 	case status == 429:
 		return &cliError{Code: 1, Msg: httpErrorMessage(status, raw)}
 	default:
-		return fmt.Errorf("service account request returned %d: %s", status, raw)
+		return &cliError{Code: 1, Msg: httpErrorMessage(status, raw)}
 	}
 }
 
@@ -4115,7 +4133,7 @@ func (rt *runtime) listAccountSessions(ctx context.Context, c *clientConfig, inc
 		return nil, err
 	}
 	if status >= 400 {
-		return nil, fmt.Errorf("list sessions returned %d: %s", status, raw)
+		return nil, &cliError{Code: 1, Msg: httpErrorMessage(status, raw)}
 	}
 	items := asSlice(body["sessions"])
 	out := make([]map[string]any, 0, len(items))
@@ -4139,7 +4157,7 @@ func (rt *runtime) revokeAccountSessionByID(ctx context.Context, c *clientConfig
 		return false, err
 	}
 	if status >= 400 {
-		return false, fmt.Errorf("revoke session returned %d: %s", status, raw)
+		return false, &cliError{Code: 1, Msg: httpErrorMessage(status, raw)}
 	}
 	return asBool(body["revoked"]) || asBool(body["ok"]), nil
 }
@@ -4180,7 +4198,7 @@ func (rt *runtime) logoutAllAccountSessions(ctx context.Context, c *clientConfig
 		return 0, err
 	}
 	if status >= 400 {
-		return status, fmt.Errorf("logout-all returned %d: %s", status, raw)
+		return status, &cliError{Code: 1, Msg: httpErrorMessage(status, raw)}
 	}
 	if !asBool(body["ok"]) {
 		return status, fmt.Errorf("logout-all did not confirm success")
@@ -4444,11 +4462,13 @@ func (rt *runtime) printResult(status int, body any) error {
 	if rt.outputJSON {
 		return rt.printJSON(result)
 	}
+	if status >= 400 {
+		// Extract user-friendly error from the response body
+		rawBytes, _ := json.Marshal(body)
+		return &cliError{Code: 1, Msg: httpErrorMessage(status, string(rawBytes))}
+	}
 	raw, _ := json.MarshalIndent(result, "", "  ")
 	fmt.Println(string(raw))
-	if status >= 400 {
-		return &cliError{Code: 1, Msg: "request failed"}
-	}
 	return nil
 }
 
