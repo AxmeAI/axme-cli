@@ -171,6 +171,8 @@ ensure_path() {
   export PATH="${INSTALL_DIR}:$PATH"
 
   log "Done. PATH updated for current and future sessions."
+  log ""
+  log "To use axme in this terminal, run:  source ${RC_FILE}"
 }
 
 ensure_path
