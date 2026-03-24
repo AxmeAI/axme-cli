@@ -20,11 +20,11 @@ func newQuotaCmd(rt *runtime) *cobra.Command {
 		Long: `View your current quota limits and usage, or request a higher-tier upgrade.
 
 Tiers:
-  email_verified (default — applied on first login):
+  Starter (default — applied on first login):
     500 intents/day · 120 req/min · 128 KB payload · 1 GB storage
     20 agents · 20 SSE streams
 
-  corporate (request via: axme quota upgrade-request):
+  Business (request via: axme quota upgrade-request):
     5000 intents/day · 600 req/min · 512 KB payload · 10 GB storage
     50 agents · 100 SSE streams`,
 	}
@@ -150,6 +150,17 @@ func newQuotaShowCmd(rt *runtime) *cobra.Command {
 			}
 
 			fmt.Println()
+			// Display tier name (map API names to user-friendly)
+			tierName := asString(quotaPolicy["tier"])
+			friendlyTier := map[string]string{
+				"email_verified": "Starter", "corporate": "Business",
+			}
+			if ft, ok := friendlyTier[tierName]; ok {
+				tierName = ft
+			}
+			if tierName != "" {
+				fmt.Printf("Tier: %s\n", tierName)
+			}
 			overage := asString(quotaPolicy["overage_mode"])
 			hard := quotaPolicy["hard_enforcement"]
 			fmt.Printf("overage_mode=%s  hard_enforcement=%v\n", overage, hard)
@@ -202,14 +213,14 @@ func newQuotaUpgradeRequestCmd(rt *runtime) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "upgrade-request",
-		Short: "Request a corporate-tier quota upgrade for your workspace",
+		Short: "Request a Business-tier quota upgrade for your workspace",
 		Long: `Submit a quota upgrade request to the AXME platform team.
 
 The request will be reviewed within 1 business day.
 On approval, your workspace quota is automatically upgraded — no further action needed.
 
 Valid upgrade tiers:
-  corporate  — 5000 intents/day · 600 req/min · 512 KB payload · 10 GB storage · 50 agents · 100 SSE streams`,
+  business  — 5000 intents/day · 600 req/min · 512 KB payload · 10 GB storage · 50 agents · 100 SSE streams`,
 		Example: `  axme quota upgrade-request \
     --company "Acme Corp" \
     --justification "Running a production pilot with ~50 AI agents"`,
@@ -218,7 +229,7 @@ Valid upgrade tiers:
 			justification = strings.TrimSpace(justification)
 			tier = strings.TrimSpace(tier)
 			if tier == "" {
-				tier = "corporate"
+				tier = "business"
 			}
 
 			if len(company) < 2 {
@@ -227,10 +238,16 @@ Valid upgrade tiers:
 			if len(justification) < 10 {
 				return fmt.Errorf("--justification is required (at least 10 characters)")
 			}
-			validTiers := map[string]bool{"email_verified": true, "corporate": true}
-			if !validTiers[tier] {
-				return fmt.Errorf("--tier must be one of: email_verified, corporate")
+			// Map user-friendly tier names to API values
+			tierMap := map[string]string{
+				"starter": "email_verified", "email_verified": "email_verified",
+				"business": "corporate", "corporate": "corporate",
 			}
+			apiTier, ok := tierMap[strings.ToLower(tier)]
+			if !ok {
+				return fmt.Errorf("--tier must be one of: starter, business")
+			}
+			tier = apiTier
 
 			c := rt.effectiveContext()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -285,7 +302,7 @@ Valid upgrade tiers:
 	}
 	cmd.Flags().StringVar(&company, "company", "", "Company or project name (required, min 2 chars)")
 	cmd.Flags().StringVar(&justification, "justification", "", "Why you need higher limits (required, min 10 chars)")
-	cmd.Flags().StringVar(&tier, "tier", "corporate", "Tier to request: corporate (default) or email_verified")
+	cmd.Flags().StringVar(&tier, "tier", "business", "Tier to request: business (default) or starter")
 	_ = cmd.MarkFlagRequired("company")
 	_ = cmd.MarkFlagRequired("justification")
 	return cmd
