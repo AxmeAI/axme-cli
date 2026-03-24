@@ -133,11 +133,6 @@ fi
 log "Installed ${BIN_NAME} ${VERSION} to ${INSTALL_DIR}/${BIN_NAME}"
 
 ensure_path() {
-  # Already in PATH — nothing to do
-  case ":$PATH:" in
-    *":${INSTALL_DIR}:"*) return 0 ;;
-  esac
-
   SHELL_NAME="$(basename "${SHELL:-/bin/sh}")"
   LINE="export PATH=\"${INSTALL_DIR}:\$PATH\""
 
@@ -158,7 +153,7 @@ ensure_path() {
     *)    RC_FILE="$HOME/.profile" ;;
   esac
 
-  # Don't duplicate if the line is already in the rc file
+  # Skip if rc file already has the path (don't check runtime PATH — may be temporary)
   if [ -f "$RC_FILE" ] && grep -qF "$INSTALL_DIR" "$RC_FILE" 2>/dev/null; then
     return 0
   fi
@@ -176,6 +171,8 @@ ensure_path() {
   export PATH="${INSTALL_DIR}:$PATH"
 
   log "Done. PATH updated for current and future sessions."
+  log ""
+  log "To use axme in this terminal, run:  source ${RC_FILE}"
 }
 
 ensure_path
