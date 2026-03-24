@@ -12,7 +12,7 @@ This project follows [Semantic Versioning](https://semver.org/). During alpha (`
 - **macOS: agent key lookup used wrong path** — `loadAgentKey` hardcoded `~/.config` but macOS uses `~/Library/Application Support`; now uses canonical `scenarioAgentsStorePath()` (#73)
 - **macOS: SSE race in `examples run`** — agents started after intent was created; SSE init phase skipped the delivery event on high-latency connections. Agents now start before `scenarios apply` (#74)
 - **Install script: `ensure_path` false positive** — runtime PATH check returned early when user had a temporary `export`; now checks rc file only (#72)
-- Install script and all docs now include `source ~/.zshrc` hint after install command
+- Install script and all docs now include a generic "source" hint after install command
 
 ## [v0.2.10] — 2026-03-24
 
