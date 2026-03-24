@@ -3460,9 +3460,27 @@ func httpErrorMessage(status int, raw string) string {
 				ResetAt   string `json:"reset_at"`
 			} `json:"details"`
 		} `json:"error"`
-		Detail string `json:"detail"`
+		Detail json.RawMessage `json:"detail"`
 	}
 	_ = json.Unmarshal([]byte(raw), &parsed)
+
+	// Extract detail as string — handles both string and array (FastAPI validation errors).
+	var detailStr string
+	if len(parsed.Detail) > 0 {
+		// Try as string first.
+		var s string
+		if json.Unmarshal(parsed.Detail, &s) == nil {
+			detailStr = s
+		} else {
+			// Try as array of validation errors [{msg: "..."}].
+			var arr []struct {
+				Msg string `json:"msg"`
+			}
+			if json.Unmarshal(parsed.Detail, &arr) == nil && len(arr) > 0 {
+				detailStr = arr[0].Msg
+			}
+		}
+	}
 
 	code := parsed.Error.Code
 	switch {
@@ -3475,7 +3493,7 @@ func httpErrorMessage(status int, raw string) string {
 	case status == 404:
 		msg := parsed.Error.Message
 		if msg == "" {
-			msg = parsed.Detail
+			msg = detailStr
 		}
 		if msg != "" {
 			return fmt.Sprintf("Not found: %s", msg)
@@ -3499,8 +3517,8 @@ func httpErrorMessage(status int, raw string) string {
 		if parsed.Error.Message != "" {
 			return fmt.Sprintf("Request failed (%d): %s", status, parsed.Error.Message)
 		}
-		if parsed.Detail != "" {
-			return fmt.Sprintf("Request failed (%d): %s", status, parsed.Detail)
+		if detailStr != "" {
+			return fmt.Sprintf("Request failed (%d): %s", status, detailStr)
 		}
 		return fmt.Sprintf("Request failed (%d).", status)
 	}
