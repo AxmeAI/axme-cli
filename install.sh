@@ -132,13 +132,53 @@ fi
 
 log "Installed ${BIN_NAME} ${VERSION} to ${INSTALL_DIR}/${BIN_NAME}"
 
-case ":$PATH:" in
-  *":${INSTALL_DIR}:"*) ;;
-  *)
-    log ""
-    log "Add ${INSTALL_DIR} to your PATH if it is not already present."
-    ;;
-esac
+ensure_path() {
+  # Already in PATH — nothing to do
+  case ":$PATH:" in
+    *":${INSTALL_DIR}:"*) return 0 ;;
+  esac
+
+  SHELL_NAME="$(basename "${SHELL:-/bin/sh}")"
+  LINE="export PATH=\"${INSTALL_DIR}:\$PATH\""
+
+  case "$SHELL_NAME" in
+    zsh)  RC_FILE="$HOME/.zshrc" ;;
+    bash)
+      # macOS defaults to .bash_profile for login shells
+      if [ -f "$HOME/.bash_profile" ]; then
+        RC_FILE="$HOME/.bash_profile"
+      else
+        RC_FILE="$HOME/.bashrc"
+      fi
+      ;;
+    fish)
+      RC_FILE="$HOME/.config/fish/config.fish"
+      LINE="fish_add_path ${INSTALL_DIR}"
+      ;;
+    *)    RC_FILE="$HOME/.profile" ;;
+  esac
+
+  # Don't duplicate if the line is already in the rc file
+  if [ -f "$RC_FILE" ] && grep -qF "$INSTALL_DIR" "$RC_FILE" 2>/dev/null; then
+    return 0
+  fi
+
+  log ""
+  log "Adding ${INSTALL_DIR} to PATH in ${RC_FILE}..."
+
+  if [ "$SHELL_NAME" = "fish" ]; then
+    mkdir -p "$(dirname "$RC_FILE")"
+  fi
+
+  printf '\n# Added by axme installer\n%s\n' "$LINE" >> "$RC_FILE"
+
+  # Make available in the current session
+  export PATH="${INSTALL_DIR}:$PATH"
+
+  log "Done. PATH updated for current and future sessions."
+}
+
+ensure_path
 
 log ""
 log "Next steps:"
