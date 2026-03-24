@@ -220,9 +220,23 @@ func (rt *runtime) runExample(cmd *cobra.Command, exampleID string) error {
 		fmt.Printf("            ✓ %d agent(s) provisioned\n", len(example.Agents))
 	}
 
-	// Step 3: Apply scenario (create intent via server-side apply)
+	// Step 3: Start built-in Go agents BEFORE submitting — so they are
+	// already listening when the intent is delivered (avoids race where
+	// the SSE init phase skips the new intent on high-latency connections).
+	if len(example.Agents) > 0 {
+		fmt.Println()
+		for i, agent := range example.Agents {
+			fmt.Printf("  [step 3]  Starting agent %d/%d (%s)...\n", i+1, len(example.Agents), agent.Addr)
+			go rt.runBuiltinAgent(ctx, c, &agent)
+		}
+		fmt.Printf("            ✓ %d agent(s) listening\n", len(example.Agents))
+		// Give agents a moment to connect SSE before submitting intent
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// Step 4: Apply scenario (create intent via server-side apply)
 	fmt.Println()
-	fmt.Println("  [step 3]  Submitting scenario...")
+	fmt.Println("  [step 4]  Submitting scenario...")
 	applyStatus, applyBody, _, applyErr := rt.request(ctx, c, "POST", "/v1/scenarios/apply",
 		nil, scenario, true)
 	if applyErr != nil {
@@ -237,17 +251,7 @@ func (rt *runtime) runExample(cmd *cobra.Command, exampleID string) error {
 	}
 	fmt.Printf("            ✓ Intent created: %s\n", intentID)
 
-	// Step 4: Start built-in Go agents
-	if len(example.Agents) > 0 {
-		fmt.Println()
-		for i, agent := range example.Agents {
-			fmt.Printf("  [step 4]  Starting agent %d/%d (%s)...\n", i+1, len(example.Agents), agent.Addr)
-			go rt.runBuiltinAgent(ctx, c, &agent)
-		}
-		fmt.Printf("            ✓ %d agent(s) listening\n", len(example.Agents))
-	}
-
-	// Step 4: Watch intent lifecycle
+	// Step 5: Watch intent lifecycle
 	return watchIntentLive(rt, cmd, intentID, nil)
 }
 
