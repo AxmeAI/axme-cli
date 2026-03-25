@@ -2,45 +2,12 @@
 
 **Go CLI for the AXME platform.** Manage intent lifecycle, configure runtime contexts, inspect audit logs, and operate the platform from the terminal — single binary, no runtime dependencies.
 
-> **Alpha** · CLI surface is stabilizing. Not recommended for production scripting yet.  
-> **Alpha** — install CLI, log in, run your first example in under 5 minutes. [Quick Start](https://cloud.axme.ai/alpha/cli) · [hello@axme.ai](mailto:hello@axme.ai)
+> **Alpha** - CLI surface is stabilizing. Install, log in, and run your first example in under 5 minutes. [Quick Start](https://cloud.axme.ai/alpha/cli) · [hello@axme.ai](mailto:hello@axme.ai)
 
 ---
 
-## What Is AXME?
-
-AXME is a coordination infrastructure for durable execution of long-running intents across distributed systems.
-
-It provides a model for executing **intents** — requests that may take minutes, hours, or longer to complete — across services, agents, and human participants.
-
-## AXP — the Intent Protocol
-
-At the core of AXME is **AXP (Intent Protocol)** — an open protocol that defines contracts and lifecycle rules for intent processing.
-
-AXP can be implemented independently.  
-The open part of the platform includes:
-
-- the protocol specification and schemas
-- SDKs and CLI for integration
-- conformance tests
-- implementation and integration documentation
-
-## AXME Cloud
-
-**AXME Cloud** is the managed service that runs AXP in production together with **The Registry** (identity and routing).
-
-It removes operational complexity by providing:
-
-- reliable intent delivery and retries  
-- lifecycle management for long-running operations  
-- handling of timeouts, waits, reminders, and escalation  
-- observability of intent status and execution history  
-
-State and events can be accessed through:
-
-- API and SDKs  
-- event streams and webhooks  
-- the cloud console
+AXME is a coordination infrastructure for durable execution of intents across services, agents, and humans.
+Learn more at [github.com/AxmeAI/axme](https://github.com/AxmeAI/axme).
 
 ---
 
@@ -151,11 +118,7 @@ The sequence diagram below shows what happens at the network level when you run 
 
 ## Rate Limits and Quotas
 
-All API calls from the CLI are subject to platform rate limits. The quota model below shows how limits are applied per org, workspace, and API key:
-
-![Rate Limit and Quota Model](https://raw.githubusercontent.com/AxmeAI/axme-docs/main/docs/diagrams/api/04-rate-limit-and-quota-model.svg)
-
-*When a rate limit is hit, the CLI displays a `429 Too Many Requests` error with a `Retry-After` value. Retry the command after the indicated wait window.*
+All API calls from the CLI are subject to platform rate limits.
 
 Alpha quota tiers:
 
@@ -164,8 +127,17 @@ Alpha quota tiers:
 | email_verified | 500 | 20 | 10 |
 | corporate | 5 000 | 200 | 50 |
 
-`email_verified` tier is applied automatically on first login via email OTP.  
+`email_verified` tier is applied automatically on first login via email OTP.
 For `corporate`, run `axme quota upgrade-request` to submit a review request.
+
+<details>
+<summary>Rate Limit and Quota Model (diagram)</summary>
+
+![Rate Limit and Quota Model](https://raw.githubusercontent.com/AxmeAI/axme-docs/main/docs/diagrams/api/04-rate-limit-and-quota-model.svg)
+
+*When a rate limit is hit, the CLI displays a `429 Too Many Requests` error with a `Retry-After` value. Retry the command after the indicated wait window.*
+
+</details>
 
 ---
 
@@ -236,6 +208,9 @@ axme agents keys create --agent-id <sa_id>
 axme agents keys revoke --agent-id <sa_id> --key-id <sak_id>
 ```
 
+<details>
+<summary>Advanced: Policies and Overrides</summary>
+
 ### Agent Send Policies
 ```bash
 axme agents policy get <address>                              # show send policy (default: open)
@@ -265,6 +240,8 @@ axme agents receive-override set <address> <open|allowlist|closed|use_org_defaul
 axme agents receive-override add <address> <sender_pattern>                      # add to agent allowlist
 axme agents receive-override remove <address> <entry_id>                         # remove entry
 ```
+
+</details>
 
 ### Organizations and Workspaces
 ```bash
@@ -341,13 +318,16 @@ Platform-operator workflows are intentionally not part of the public `axme` user
 
 ---
 
-## Capacity and Latency Budget
+<details>
+<summary>Capacity and Latency Budget (diagram)</summary>
 
 For teams doing performance analysis or capacity planning:
 
 ![Capacity and Latency Budget](https://raw.githubusercontent.com/AxmeAI/axme-docs/main/docs/diagrams/operations/04-capacity-latency-budget.svg)
 
 *The CLI adds negligible latency overhead. Gateway p99 is the dominant term.*
+
+</details>
 
 ---
 
@@ -377,6 +357,7 @@ go test ./...
 | Repository | Role |
 |---|---|
 | [axme-sdk-go](https://github.com/AxmeAI/axme-sdk-go) | Go SDK that the CLI is built on |
+| [axme-examples](https://github.com/AxmeAI/axme-examples) | End-to-end examples and scenario walkthroughs |
 | [axme-docs](https://github.com/AxmeAI/axme-docs) | Full API reference and integration guides |
 | Runtime operations (private) | Deployment and operational runbooks are maintained internally |
 
