@@ -1,4 +1,32 @@
-# axme-cli
+# AXME CLI
+
+Run async workflows in 2 minutes.
+
+```bash
+axme login
+axme examples run human/cli
+```
+
+```
+  Intent submitted
+  Waiting for approval...
+  Approved
+  Completed
+
+Result: deployment approved
+```
+
+Try it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AxmeAI/axme-cli/main/install.sh | sh
+```
+
+Works with AXME Cloud or your own agent runtime.
+
+Main project: [github.com/AxmeAI/axme](https://github.com/AxmeAI/axme)
+
+---
 
 **Go CLI for the AXME platform.** Manage intent lifecycle, configure runtime contexts, inspect audit logs, and operate the platform from the terminal — single binary, no runtime dependencies.
 
