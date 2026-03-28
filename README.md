@@ -34,11 +34,6 @@ Main project: [github.com/AxmeAI/axme](https://github.com/AxmeAI/axme)
 
 ---
 
-AXME is a coordination infrastructure for durable execution of intents across services, agents, and humans.
-Learn more at [github.com/AxmeAI/axme](https://github.com/AxmeAI/axme).
-
----
-
 ## What You Can Do With the CLI
 
 - **Authenticate and onboard** — `axme login` is the primary cloud alpha entry point; direct key/token input is still supported
@@ -391,9 +386,10 @@ go test ./...
 
 ---
 
-## Contributing & Contact
+## Contributing
 
-- Bug reports and feature requests: open an issue in this repository
-- Quick Start: https://cloud.axme.ai/alpha/cli · Contact: [hello@axme.ai](mailto:hello@axme.ai)
-- Security disclosures: see [SECURITY.md](SECURITY.md)
-- Contribution guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
+Bug reports and feature requests: open an issue. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
+[hello@axme.ai](mailto:hello@axme.ai) · [Security](SECURITY.md) · [License](LICENSE)
