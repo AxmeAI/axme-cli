@@ -6,6 +6,16 @@ This project follows [Semantic Versioning](https://semver.org/). During alpha (`
 
 ---
 
+## [v0.2.12] — 2026-03-31
+
+### Added
+- **`axme mesh dashboard`** — opens the Agent Mesh dashboard (mesh.axme.ai) in the browser with automatic SSO. Creates a one-time exchange token, opens the browser. Supports `--no-browser` and `--json` flags. (#81)
+
+### Changed
+- README redesigned with hero section and output demo (#78, #79, #80)
+
+---
+
 ## [v0.2.11] — 2026-03-24
 
 ### Fixed
