@@ -194,6 +194,7 @@ func buildRoot(rt *runtime) *cobra.Command {
 		newUpdateCmd(rt),
 		// newRawCmd removed — debug tool, not for public CLI
 		newQuotaCmd(rt),
+		newMeshCmd(rt),
 	)
 	return cmd
 }
