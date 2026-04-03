@@ -1816,7 +1816,11 @@ Examples:
 				"limit":           limitN,
 				"status_filter":   statuses,
 			}
+			// Use extended timeout for bulk cancel (may process hundreds of intents)
+			origClient := rt.httpClient
+			rt.httpClient = &http.Client{Timeout: 300 * time.Second}
 			status, body, _, err := rt.request(cmd.Context(), ctx, "POST", "/v1/intents/bulk-cancel", nil, payload, true)
+			rt.httpClient = origClient
 			if err != nil {
 				return err
 			}
