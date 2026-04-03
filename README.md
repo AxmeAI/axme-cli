@@ -195,6 +195,13 @@ axme intents watch <intent_id>     # stream live state events
 axme intents cancel <intent_id>
 axme intents retry <intent_id>
 axme intents resume <intent_id>
+
+# Bulk cleanup stale/zombie intents
+axme intents cleanup --dry-run                        # preview what would be canceled
+axme intents cleanup --dry-run=false                  # execute cancellation
+axme intents cleanup --status IN_PROGRESS,WAITING     # target specific statuses
+axme intents cleanup --older-than 12                  # inactive for >12 hours
+axme intents cleanup --limit 100 --reason "cleanup"   # with limit and audit reason
 ```
 
 ### Human Tasks
