@@ -1784,27 +1784,43 @@ func newIntentsCleanupCmd(rt *runtime) *cobra.Command {
 	var dryRun bool
 	var reason string
 	var limitN int
+	var statusFilter string
 	cmd := &cobra.Command{
 		Use:   "cleanup",
 		Short: "Cancel stuck/zombie intents that have been inactive for too long",
-		Long: `Bulk-cancel intents stuck in non-terminal status (DELIVERED, WAITING, etc.)
-for longer than the specified duration.
+		Long: `Bulk-cancel intents stuck in non-terminal status for longer than the
+specified duration.
 
 Use --dry-run (default) to preview what would be canceled.
+Use --status to target specific statuses (comma-separated).
 
 Examples:
   axme intents cleanup --older-than 24 --dry-run
   axme intents cleanup --older-than 12 --dry-run=false
+  axme intents cleanup --status IN_PROGRESS,WAITING --older-than 8 --dry-run=false
   axme intents cleanup --older-than 1 --dry-run=false --reason "test cleanup"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := rt.effectiveContext()
+			// Parse comma-separated status filter into a slice
+			var statuses []string
+			for _, s := range strings.Split(statusFilter, ",") {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					statuses = append(statuses, s)
+				}
+			}
 			payload := map[string]any{
 				"older_than_hours": olderThan,
 				"dry_run":         dryRun,
 				"reason":          reason,
 				"limit":           limitN,
+				"status_filter":   statuses,
 			}
+			// Use extended timeout for bulk cancel (may process hundreds of intents)
+			origClient := rt.httpClient
+			rt.httpClient = &http.Client{Timeout: 300 * time.Second}
 			status, body, _, err := rt.request(cmd.Context(), ctx, "POST", "/v1/intents/bulk-cancel", nil, payload, true)
+			rt.httpClient = origClient
 			if err != nil {
 				return err
 			}
@@ -1822,7 +1838,7 @@ Examples:
 
 			if dryRun {
 				count := int(asFloat(body["would_cancel"]))
-				fmt.Printf("Dry run: %d intents would be canceled\n", count)
+				fmt.Printf("Dry run: %d intents would be canceled (statuses: %s)\n", count, statusFilter)
 				ids := asSlice(body["intent_ids"])
 				for _, id := range ids {
 					fmt.Printf("  %s\n", asString(id))
@@ -1832,15 +1848,16 @@ Examples:
 				}
 			} else {
 				count := int(asFloat(body["canceled"]))
-				fmt.Printf("✓ Canceled %d zombie intents (reason: %s)\n", count, reason)
+				fmt.Printf("Canceled %d zombie intents (reason: %s)\n", count, reason)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().Float64Var(&olderThan, "older-than", 24, "Cancel intents inactive for more than this many hours")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", true, "Preview only — do not actually cancel")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", true, "Preview only - do not actually cancel")
 	cmd.Flags().StringVar(&reason, "reason", "zombie cleanup via CLI", "Cancellation reason")
 	cmd.Flags().IntVar(&limitN, "limit", 500, "Maximum number of intents to cancel")
+	cmd.Flags().StringVar(&statusFilter, "status", "DELIVERED,WAITING,IN_PROGRESS,SUBMITTED,ACKNOWLEDGED", "Comma-separated statuses to target")
 	return cmd
 }
 
