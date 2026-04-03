@@ -6,6 +6,16 @@ This project follows [Semantic Versioning](https://semver.org/). During alpha (`
 
 ---
 
+## [v0.2.13] — 2026-04-03
+
+### Added
+- **`axme intents cleanup --status`** — filter which statuses to target during bulk cleanup (default: DELIVERED, WAITING, IN_PROGRESS, SUBMITTED, ACKNOWLEDGED). (#83)
+
+### Changed
+- **Bulk cleanup timeout increased** — HTTP timeout for `axme intents cleanup` raised from 60s to 300s to handle large batches without hanging. (#83)
+
+---
+
 ## [v0.2.12] — 2026-03-31
 
 ### Added
