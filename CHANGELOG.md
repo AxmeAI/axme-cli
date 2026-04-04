@@ -6,13 +6,16 @@ This project follows [Semantic Versioning](https://semver.org/). During alpha (`
 
 ---
 
-## [v0.2.13] — 2026-04-03
+## [v0.2.13] — 2026-04-04
 
 ### Added
 - **`axme intents cleanup --status`** — filter which statuses to target during bulk cleanup (default: DELIVERED, WAITING, IN_PROGRESS, SUBMITTED, ACKNOWLEDGED). (#83)
 
 ### Changed
 - **Bulk cleanup timeout increased** — HTTP timeout for `axme intents cleanup` raised from 60s to 300s to handle large batches without hanging. (#83)
+
+### Fixed
+- **Scenario watch SSE delay** — reduced `wait_seconds` from 30s to 5s in intent event stream, cutting worst-case delay after email approval from ~30s to ~5s. (#85)
 
 ---
 
