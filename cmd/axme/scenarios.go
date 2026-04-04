@@ -642,7 +642,7 @@ func watchIntentLive(rt *runtime, cmd *cobra.Command, intentID string, bundle *s
 	}
 
 	for {
-		url := fmt.Sprintf("%s/v1/intents/%s/events/stream?since=%d&wait_seconds=30", baseURL, intentID, nextSeq)
+		url := fmt.Sprintf("%s/v1/intents/%s/events/stream?since=%d&wait_seconds=5", baseURL, intentID, nextSeq)
 		req, err := http.NewRequestWithContext(cmd.Context(), "GET", url, nil)
 		if err != nil {
 			return fmt.Errorf("watch: %w", err)
