@@ -4240,6 +4240,7 @@ func (rt *runtime) hydrateContextFromServer(ctx context.Context, c *clientConfig
 }
 
 func (rt *runtime) applyAuthHeaders(req *http.Request, c *clientConfig) {
+	req.Header.Set("X-Axme-Client", "axme-cli/"+version)
 	if c.APIKey != "" {
 		req.Header.Set("x-api-key", c.APIKey)
 	}

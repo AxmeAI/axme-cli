@@ -271,6 +271,34 @@ func (rt *runtime) runEmailLogin(ctx context.Context, ctxName string) error {
 		return err
 	}
 
+	// Optional profile collection (name + company) — best-effort, never blocks login.
+	if !rt.outputJSON && c.resolvedActorToken() != "" {
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "  Quick profile (press Enter to skip):")
+		fmt.Fprintln(os.Stderr)
+
+		fmt.Fprint(os.Stderr, "  Your name: ")
+		nameReader := bufio.NewReader(os.Stdin)
+		nameLine, _ := nameReader.ReadString('\n')
+		displayName := strings.TrimSpace(nameLine)
+
+		fmt.Fprint(os.Stderr, "  Company: ")
+		companyReader := bufio.NewReader(os.Stdin)
+		companyLine, _ := companyReader.ReadString('\n')
+		company := strings.TrimSpace(companyLine)
+
+		if displayName != "" || company != "" {
+			profilePayload := map[string]any{}
+			if displayName != "" {
+				profilePayload["display_name"] = displayName
+			}
+			if company != "" {
+				profilePayload["company"] = company
+			}
+			_, _, _, _ = rt.request(ctx, c, "POST", "/v1/portal/personal/profile", nil, profilePayload, true)
+		}
+	}
+
 	summary := rt.deviceLoginSummary(ctx, c, ctxName, hydrated)
 	if rt.outputJSON {
 		return rt.printJSON(summary)
