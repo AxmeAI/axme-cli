@@ -4,11 +4,40 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
 
 const defaultMeshDashboardURL = "https://mesh.axme.ai"
+
+// resolveDashboardURL picks the dashboard URL using this precedence:
+//  1. explicit --dashboard-url flag (if non-empty and not equal to default)
+//  2. AXME_MESH_DASHBOARD_URL env var
+//  3. context-aware default: if gateway base_url looks like staging, the
+//     hardcoded prod URL will produce token mismatches — return empty string
+//     so the caller fails fast with a clear message
+//  4. defaultMeshDashboardURL (prod)
+func resolveDashboardURL(flagValue, gatewayBaseURL string) (string, error) {
+	if flagValue != "" && flagValue != defaultMeshDashboardURL {
+		return flagValue, nil
+	}
+	if envURL := strings.TrimSpace(os.Getenv("AXME_MESH_DASHBOARD_URL")); envURL != "" {
+		return envURL, nil
+	}
+	// Detect non-prod gateway: if the gateway is not api.cloud.axme.ai, the
+	// hardcoded prod dashboard URL will fail token exchange (token lives in a
+	// different environment's database). Refuse to open the wrong dashboard.
+	if gatewayBaseURL != "" && !strings.Contains(gatewayBaseURL, "api.cloud.axme.ai") {
+		return "", fmt.Errorf(
+			"current gateway is %q (non-prod). The default mesh dashboard at %s "+
+				"only works with the prod gateway. Set AXME_MESH_DASHBOARD_URL to a dashboard "+
+				"deployment connected to your gateway, or pass --dashboard-url",
+			gatewayBaseURL, defaultMeshDashboardURL,
+		)
+	}
+	return defaultMeshDashboardURL, nil
+}
 
 func newMeshCmd(rt *runtime) *cobra.Command {
 	cmd := &cobra.Command{
@@ -30,11 +59,28 @@ func newMeshDashboardCmd(rt *runtime) *cobra.Command {
 
 The command creates a one-time exchange token using your API key,
 then opens the dashboard in your default browser. The token is
-valid for 5 minutes and can only be used once.`,
+valid for 5 minutes and can only be used once.
+
+Dashboard URL precedence:
+  1. --dashboard-url flag
+  2. AXME_MESH_DASHBOARD_URL environment variable
+  3. https://mesh.axme.ai (default, prod-only)
+
+Non-prod gateways (e.g. staging) will refuse to open the default URL because
+the token would be created on the staging backend but the prod dashboard
+would try to exchange it against the prod backend, producing
+"Invalid exchange token". Use --dashboard-url or AXME_MESH_DASHBOARD_URL.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := rt.effectiveContext()
 			if c.APIKey == "" {
 				return &cliError{Code: 2, Msg: "no API key configured. Run 'axme login' first."}
+			}
+
+			// Resolve dashboard URL BEFORE creating the token, so we fail fast
+			// when the gateway is non-prod and no override is provided.
+			resolvedDashboardURL, urlErr := resolveDashboardURL(dashboardURL, c.BaseURL)
+			if urlErr != nil {
+				return &cliError{Code: 2, Msg: urlErr.Error()}
 			}
 
 			// Create exchange token
@@ -60,7 +106,7 @@ valid for 5 minutes and can only be used once.`,
 				return &cliError{Code: 1, Msg: "server returned empty token"}
 			}
 
-			exchangeURL := fmt.Sprintf("%s/auth/exchange?token=%s", dashboardURL, token)
+			exchangeURL := fmt.Sprintf("%s/auth/exchange?token=%s", resolvedDashboardURL, token)
 
 			if rt.outputJSON {
 				rt.printJSON(map[string]any{
