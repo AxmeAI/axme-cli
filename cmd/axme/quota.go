@@ -81,7 +81,7 @@ func newQuotaShowCmd(rt *runtime) *cobra.Command {
 
 			if len(dims) == 0 {
 				fmt.Println("No quota policy found for this workspace.")
-				fmt.Println("To request limits, email hello@axme.ai with your org email and usage scenario.")
+				fmt.Println("To request limits, email contact@axme.ai with your org email and usage scenario.")
 				return nil
 			}
 

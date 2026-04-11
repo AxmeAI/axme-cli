@@ -3525,7 +3525,7 @@ func httpErrorMessage(status int, raw string) string {
 			if d.ResetAt != "" {
 				msg += fmt.Sprintf(" Resets at %s.", d.ResetAt)
 			}
-			msg += "\nRun `axme quota show` to check your limits, or email hello@axme.ai to request higher limits."
+			msg += "\nRun `axme quota show` to check your limits, or email contact@axme.ai to request higher limits."
 			return msg
 		}
 		return "Rate limit exceeded. Please wait before retrying."

@@ -30,7 +30,7 @@ Main project: [github.com/AxmeAI/axme](https://github.com/AxmeAI/axme)
 
 **Go CLI for the AXME platform.** Manage intent lifecycle, configure runtime contexts, inspect audit logs, and operate the platform from the terminal — single binary, no runtime dependencies.
 
-> **Alpha** - CLI surface is stabilizing. Install, log in, and run your first example in under 5 minutes. [Quick Start](https://cloud.axme.ai/alpha/cli) · [hello@axme.ai](mailto:hello@axme.ai)
+> **Alpha** - CLI surface is stabilizing. Install, log in, and run your first example in under 5 minutes. [Quick Start](https://cloud.axme.ai/alpha/cli) · [contact@axme.ai](mailto:contact@axme.ai)
 
 ---
 
@@ -399,4 +399,4 @@ Bug reports and feature requests: open an issue. See [CONTRIBUTING.md](CONTRIBUT
 
 ---
 
-[hello@axme.ai](mailto:hello@axme.ai) · [Security](SECURITY.md) · [License](LICENSE)
+[contact@axme.ai](mailto:contact@axme.ai) · [Security](SECURITY.md) · [License](LICENSE)
